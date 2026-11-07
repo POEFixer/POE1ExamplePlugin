@@ -1,0 +1,8 @@
+# Text files are stored with LF line endings; Git checks them out in the platform's style.
+* text=auto
+
+# Visual Studio expects CRLF in solution and project files.
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+
+*.png binary
