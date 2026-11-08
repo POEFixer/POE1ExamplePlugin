@@ -189,12 +189,14 @@ reported Incompatible.
 <POE1Fixer folder>\
   POE1Fixer.exe
   POE1FixerPluginHost.exe
-  Plugins\                      created by you or the user; the app never creates or deletes it
+  Plugins\                      the user's; the app creates it only on a user action, never deletes it
     hello\                      any folder name, Cyrillic / CJK included
       plugin.json
       Hello.dll
       any-dependency.dll        dependency DLLs go NEXT TO your DLL
       data\...                  your read-only data files
+      .catalog.json             only in a folder the catalog installed (its marker)
+    .staging\  .trash\          the catalog installer's work folders, never listed as plugins
   Configs\plugins\
     plugins.json                the app's enable / consent switches (do not edit while it runs)
     data\
@@ -206,18 +208,84 @@ In this repository, building `POE1ExamplePlugin.sln` writes
 `x64\<Configuration>\Plugins\ExamplePlugin\` (DLL + `plugin.json`): the folder to copy into
 `<POE1Fixer folder>\Plugins\`.
 
-### Enable it
+### Install and enable it
+
+**Users** install the plugins of POE1Fixer's catalog from the app: **Plugins** tab, **Catalog**,
+**Install**. The app downloads the plugin's release zip from GitHub, checks it against the catalog,
+puts it in `Plugins\<folder>\` and turns on its **Enable** switch (it runs while **Run plugins**
+is on). **Allow input** stays off until the user ticks it.
+**Update to X** replaces the installed copy and keeps its **Enable** and **Allow input** switches.
+**Remove** deletes the folder, keeps `Configs\plugins\data\<id>\` and the **Enable** switch, and
+turns **Allow input** off: whatever build comes next under that id has to be granted input again.
+
+**While you develop**, copy your build in by hand:
 
 1. Copy the folder into `<POE1Fixer folder>\Plugins\`.
-2. In the app, open the **Plugins** tab and press **Rescan** (or restart the app).
-3. Select the plugin and turn on **Enable**. Plugins always start disabled. With the `input`
-   permission, the user also has to turn on **Allow input** separately.
-4. The state chip goes Starting, then Running. Your panel appears under the plugin's details, and
-   your log lines show up in the plugin's log view.
+2. In the app, open the **Plugins** tab and press **Rescan** (the icon button with the folder tree,
+   top right; its tooltip starts with "Rescan"), or restart the app.
+3. Select the plugin and turn on **Enable**. A plugin placed by hand starts disabled, unless its id
+   was enabled before (the app keeps the switches by id). With the `input` permission, the user
+   also has to turn on **Allow input** separately.
+4. The state chip goes Starting, then Running. Your panel fills the **Plugin settings** tab of the
+   plugin's page, and your log lines show up in its **Recent log** tab.
+
+The catalog never updates or removes a folder placed by hand. Only a folder the catalog installed
+carries its marker `.catalog.json`, naming that folder and the plugin's id. If the catalog lists
+your id, its card reads **Installed separately** and offers no Update or Remove, and on the
+**Installed** page your plugin has an "Open its folder" button where a catalog plugin has
+**Remove**. Do not copy your build over a folder the catalog installed: its marker stays, and the
+catalog then treats the folder as its own (an update from the catalog replaces your build, and its
+**Remove** deletes it). Use a folder of your own, or delete `.catalog.json` from it.
 
 To ship a new build, disable the plugin first: the DLL stays locked while its process runs.
 Replace the files, press **Rescan**, then enable it again. A running plugin keeps the manifest it
 was started with until it restarts.
+
+### Publishing a plugin in the catalog
+
+For the POE1Fixer maintainers. The catalog is `catalog.json` in the GitHub repository
+`POEFixer/POE1PluginCatalog`. The app reads it from that repository's `HEAD` over HTTPS and
+installs only what it lists. Nothing is signed: a download is trusted because it comes over HTTPS
+from a GitHub release of a repository of the `POEFixer` account, and its size and SHA-256 match the
+catalog entry. So only plugins released from a `POEFixer/<repo>` repository can be listed; the app
+skips any other entry. The tools are in the POE1Fixer source repository, under `tools/plugin_sdk/`
+(Python 3.8+, standard library only, no network).
+
+1. Build the plugin in Release (a Dbg DLL names drive-letter paths, which `package_plugin.py`
+   refuses). In its `plugin.json`, `version` must be `X.Y.Z` (each part 0..99999, no leading zero)
+   and `sdk` the app's `P1_ABI_VERSION`.
+2. Package it: `python tools/plugin_sdk/package_plugin.py <build folder> <out.zip>`, with
+   `--extra REL` for each further file. The zip is deterministic (the same files give the same
+   bytes). The tool prints its size and SHA-256.
+3. Publish a GitHub release of the plugin's `POEFixer/<repo>` with the tag `v` + the version
+   (`v1.2.0`), and attach that zip as an asset, byte-identical.
+4. Add or update the plugin's entry in `tools/plugin_sdk/catalog_sources.json` (`repo`, `tag`,
+   `folder`, `asset`, `zip`, `min_app_version`, optional `changes` and `i18n`), then run
+   `python tools/plugin_sdk/gen_catalog.py --out <your clone of POE1PluginCatalog>`. It takes
+   every field the app shows from the zip itself and writes `catalog.json` and `README.md`.
+   `--check` only compares.
+5. Check the result with the app's own code: run a Dbg build of the app (its version at least the
+   entry's `min_app_version`) as `POE1Fixer.exe --plugincatalogcheck <catalog.json> <zip> [<zip> ...]`.
+   It parses the catalog, matches each zip to its entry by size and SHA-256, extracts it the way
+   the installer does and checks its `plugin.json`. The exit code is the number of failures.
+6. Commit and push the catalog repository. An app fetches the catalog the first time its Plugins
+   tab is shown in a session, and on **Refresh**; GitHub's file cache can lag a few minutes behind
+   a push.
+
+What the installer accepts (it checks the size and SHA-256 first, then every entry, before it
+extracts a file):
+
+- a zip of at most 64 MiB, at most 256 entries and at most 256 MiB unpacked;
+- `plugin.json` and the DLL it names at the root of the zip, with `id`, `version` and `sdk` equal
+  to the catalog entry's;
+- regular files only, stored or deflated, not encrypted: no directory entries, links or reparse
+  points;
+- names of 1..240 bytes of UTF-8, relative and `/`-separated, without `\`, `:`, a control
+  character or `* ? " < > |`; no empty, `.` or `..` component, no component with a leading space
+  or a trailing dot or space, no Windows device name, and no two names that differ only in ASCII
+  case.
+
+`package_plugin.py` writes zips that pass, and refuses (writing nothing) a build that would not.
 
 ## 4. plugin.json reference
 
@@ -612,8 +680,9 @@ scales the result to the client size. The C form is
 
 ### Settings panel: `OnPanel`
 
-- Drawn inside the app's **Plugins** tab, under your plugin's details. **Coordinates are
-  panel-local pixels**, and the size is `f.panel_w` x `f.panel_h`; prefer
+- Drawn inside the app's **Plugins** tab, in the **Plugin settings** tab of your plugin's page:
+  it fills the card below the plugin's header, never less than 330 px high at 100 % UI scale.
+  **Coordinates are panel-local pixels**, and the size is `f.panel_w` x `f.panel_h`; prefer
   `ImGui::GetContentRegionAvail()`.
 - You are inside a full-panel window with no title bar, which scrolls inside itself. It gets
   **full mouse and keyboard input** while the user hovers or focuses it and the app's menu is
@@ -890,11 +959,35 @@ dropped and counted. Do not log every frame: log changes.
 
 ### The Plugins tab
 
-Each plugin shows a **state chip**, a **state detail** line, a **telemetry** line, its settings
-panel and a collapsible **log** with the newest 200 lines: your own lines and the app's lines about
-your plugin. **Restart** stops the plugin and starts it again at once, and clears Faulted,
-Incompatible and SandboxError together with the crash history. Disabling and re-enabling a plugin
-clears them too.
+The tab has two pages, switched at its top left: **Installed** and **Catalog** (a badge on Catalog
+counts the updates it offers). At the top right are **Run plugins** (every plugin on or off) and
+two icon buttons that name themselves in their tooltips: open the plugins folder, and **Rescan**
+(the folder tree).
+
+**Installed** lists the plugins on the left, in a narrow column (150 to 190 px at 100 % UI scale).
+A row shows the name, then the **state chip** and the installed version, or the update the catalog
+offers. The selected plugin fills the rest of the page:
+
+- a compact **header card**: the name, version, author and permission chips on one row, the
+  description on one line (all of it in the tooltip), then **Enable**, **Allow input** (only with
+  the `input` permission), **Restart**, **Update to X** or **Repair** when the catalog offers one,
+  and **Remove** (a plugin the catalog installed) or "Open its folder" (a plugin placed by hand).
+  Below them: the **state detail**, the restart countdown, the crash count of the last 10 minutes,
+  and this session's install, update or removal (its progress, that it is done, or why and when it
+  failed);
+- the **main card**, with three tabs: **Plugin settings** (your panel, shown first), **Recent log**
+  (the newest 200 lines: your own lines and the app's lines about your plugin) and **Resource use**
+  (the telemetry). Without your panel on screen, the settings tab says that the plugin has no
+  settings page, that **Run plugins** is off, or that its settings appear there while it runs,
+  with an **Enable** button when the plugin is disabled.
+
+**Catalog** shows **Refresh**, the time of the last check, and one card per catalog plugin with its
+action: **Install**, **Update to X**, **Repair**, or a chip (Installed, Incompatible, Needs a newer
+POE1Fixer, Folder in use, Installed separately), **Settings** for an installed plugin (it opens
+the plugin on the Installed page), and **Remove** for a plugin the catalog installed.
+
+**Restart** stops the plugin and starts it again at once, and clears Faulted, Incompatible and
+SandboxError together with the crash history. Disabling and re-enabling a plugin clears them too.
 
 | State | Meaning | What happens next |
 |---|---|---|
@@ -914,7 +1007,7 @@ Typical details: `ACCESS_VIOLATION in MyPlugin.dll+0x1A2B`, `std::terminate`, `a
 `the DLL failed to load (missing dependency?): LoadLibrary failed, error 126: ...`,
 `built with Dear ImGui 19250, this host uses 19280 (rebuild with the plugin SDK)`.
 
-The **telemetry** line shows: CPU use (percent of one core, averaged over about 1 s, so it can
+The **Resource use** tab shows: CPU use (percent of one core, averaged over about 1 s, so it can
 exceed 100 with several busy threads), working set, the duration of your last `OnTick`,
 `OnOverlay` and `OnPanel` in milliseconds, the render-thread cost the app attributes to you,
 overlay and panel vertices per frame, live texture bytes, rejected frames, dropped log lines and
@@ -922,8 +1015,8 @@ refused input actions.
 
 ### Logs
 
-- Your plugin's log view in the **Plugins** tab: every line you log (the newest 200) and the app's
-  lines about your plugin.
+- Your plugin's **Recent log** tab in the **Plugins** tab: every line you log (the newest 200) and
+  the app's lines about your plugin.
 - **System Logs** tab, category **Plugins**: only your `WARN` and `ERROR` lines, as `[<id>] text`
   (at most one plugin line a second across all plugins), and the app's lines about your plugin as
   `plugin <id>: text`, for example:

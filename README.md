@@ -140,19 +140,39 @@ table is stale.
 
 ## Install
 
+### From the app (users)
+
+SDK Example is in POE1Fixer's plugin catalog, so nothing has to be built or copied by hand.
+
+1. In POE1Fixer, open the **Plugins** tab and switch to **Catalog**. The app loads the catalog from
+   GitHub the first time you open it in a session; **Refresh** loads it again.
+2. Press **Install** on **SDK Example**. The app downloads the release asset of this repository,
+   installs it only if its size and SHA-256 match what the catalog lists, and starts it. Plugins
+   start once you are signed in.
+3. **Allow input** stays off after an install. It is optional: without it every lesson works; only
+   the Input lesson's safe demo cannot be armed, and its page says why.
+
+When a newer release is listed, the card shows **Update to X.Y.Z**. An update keeps the plugin's
+enabled state, its "Allow input" choice and its settings. **Remove** deletes the plugin's folder and
+keeps its data folder, so a reinstall finds its settings again ("Allow input" has to be ticked
+again).
+
+### From a build (developers)
+
 1. Copy `x64\Release\Plugins\ExamplePlugin` into `<POE1Fixer folder>\Plugins\`, so that you get
    `Plugins\ExamplePlugin\ExamplePlugin.dll` and `Plugins\ExamplePlugin\plugin.json`. Create the
-   `Plugins` folder if it does not exist: the app never creates or deletes it.
-2. In POE1Fixer, open the **Plugins** tab and press **Rescan** (or restart the app). Plugins start
-   once you are signed in.
-3. Select **SDK Example** and turn on **Enable**. Every plugin starts disabled.
-4. **Allow input** is optional. Without it every lesson works; only the Input lesson's safe demo
-   cannot be armed, and its page says why.
+   `Plugins` folder if it does not exist.
+2. In POE1Fixer, open the **Plugins** tab and press **Rescan** (the folder-tree button at the top
+   right), or restart the app.
+3. Select **SDK Example** and turn on **Enable**. A plugin copied by hand starts disabled.
 
-The panel appears under the plugin's details in the Plugins tab: pick a lesson on the left. The
-plugin keeps its settings in `<POE1Fixer folder>\Configs\plugins\data\example\settings.json`.
-To install a new build, disable the plugin first (its DLL is locked while its process runs), replace
-the files, press **Rescan**, and enable it again.
+A folder copied by hand carries no catalog marker, so the catalog never updates or removes it: its
+card reads "Installed separately". Remove a catalog install first if you want to run your own build
+under the same id. To install a new build, disable the plugin first (its DLL is locked while its
+process runs), replace the files, press **Rescan**, and enable it again.
+
+The plugin's panel fills the **Plugin settings** tab of the Plugins page: pick a lesson on the left.
+The plugin keeps its settings in `<POE1Fixer folder>\Configs\plugins\data\example\settings.json`.
 
 ## Permissions
 
