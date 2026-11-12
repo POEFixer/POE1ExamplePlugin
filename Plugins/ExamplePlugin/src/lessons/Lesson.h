@@ -84,6 +84,7 @@ std::unique_ptr<Lesson> MakeClipboardLesson();
 std::unique_ptr<Lesson> MakeMemoryLesson();
 std::unique_ptr<Lesson> MakePerformanceLesson();
 std::unique_ptr<Lesson> MakeThreadsLesson();
+std::unique_ptr<Lesson> MakeMapRadarLesson();
 
 std::vector<std::unique_ptr<Lesson>> MakeAllLessons();
 

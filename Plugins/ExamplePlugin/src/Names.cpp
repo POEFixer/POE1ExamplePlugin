@@ -34,6 +34,7 @@ const char* EventName(uint32_t type) {
         case P1_EV_LANGUAGE:          return "LANGUAGE";
         case P1_EV_GAME_FOCUS:        return "GAME_FOCUS";
         case P1_EV_INPUT_GATE:        return "INPUT_GATE";
+        case P1_EV_TERRAIN_CHANGED:   return "TERRAIN_CHANGED";
         default:                      return "UNKNOWN";
     }
 }
@@ -116,8 +117,11 @@ constexpr BitName kFlags[] = {
       "and anything queued is dropped." },
     { P1_SNAP_CAMERA_VALID, "CAMERA_VALID", "camera is valid: world positions can be projected to the screen." },
     { P1_SNAP_BUFFS_VALID, "BUFFS_VALID", "Gate: AutoPot. Player buffs are read only while the app's AutoPot runs." },
-    { P1_SNAP_MAP_VALID, "MAP_VALID", "Gate: radar. large_map / mini_map are read only while the app's radar runs." },
+    { P1_SNAP_MAP_VALID, "MAP_VALID", "Gate: radar. large_map / mini_map are read only while the app's radar, or a plugin "
+      "with the \"radar\" permission (this one has it), runs." },
     { P1_SNAP_INVENTORY_VALID, "INVENTORY_VALID", "The main inventory (12 x 5) is valid." },
+    { P1_SNAP_RADAR_VALID, "RADAR_VALID", "Gate: radar. The radar reads ran this tick: the radar block (p1_radar.h) is fresh. "
+      "The block is written while a plugin with the \"radar\" permission runs." },
 };
 
 constexpr BitName kComponents[] = {
@@ -151,11 +155,16 @@ std::span<const BitName> SnapshotFlagNames() { return kFlags; }
 std::span<const BitName> ComponentNames() { return kComponents; }
 
 std::string PermissionsText(uint32_t perms) {
-    const bool mem = (perms & P1_PERM_MEMORY) != 0, in = (perms & P1_PERM_INPUT) != 0;
-    if (mem && in) return "memory + input";
-    if (mem) return "memory";
-    if (in) return "input";
-    return "none";
+    std::string out;
+    auto add = [&out](uint32_t bit, uint32_t all, const char* name) {
+        if (!(all & bit)) return;
+        if (!out.empty()) out += " + ";
+        out += name;
+    };
+    add(P1_PERM_MEMORY, perms, "memory");
+    add(P1_PERM_INPUT, perms, "input");
+    add(P1_PERM_RADAR, perms, "radar");
+    return out.empty() ? "none" : out;
 }
 
 std::string VkName(int vk) {

@@ -42,6 +42,7 @@ constexpr TypeRow kTypes[] = {
     { P1_EV_LANGUAGE, "", "The app's UI language changed: re-read HostApi().language." },
     { P1_EV_GAME_FOCUS, "a = 1 / 0", "The game window came to the front, or lost it." },
     { P1_EV_INPUT_GATE, "a = 1 / 0", "The app now accepts, or refuses, input requests." },
+    { P1_EV_TERRAIN_CHANGED, "a = serial", "A new area terrain reached P1Frame.terrain (\"radar\" permission)." },
 };
 
 // [snippet:events]
@@ -60,6 +61,7 @@ std::string DescribeEvent(const P1Event& e) {
         case P1_EV_LANGUAGE:          return "the app's language changed";
         case P1_EV_GAME_FOCUS:        return e.a ? "the game came to the front" : "the game lost the front";
         case P1_EV_INPUT_GATE:        return e.a ? "input requests accepted" : "input requests refused";
+        case P1_EV_TERRAIN_CHANGED:   return Fmt("a new area terrain, serial %lld", static_cast<long long>(e.a));
         default:                      return Fmt("unknown type %u (a newer app): ignored", e.type);
     }
 }

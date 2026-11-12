@@ -1,7 +1,7 @@
 # POE1ExamplePlugin: the SDK Example for POE1Fixer plugins
 
 **SDK Example** is the reference plugin for the POE1Fixer plugin SDK: a guided tour of the SDK
-in 23 lessons. Each lesson is one page of the plugin's panel. It shows one part of the
+in 24 lessons. Each lesson is one page of the plugin's panel. It shows one part of the
 SDK working on live game data, states the limits the app enforces, and puts the code that does it
 on your clipboard.
 
@@ -27,7 +27,7 @@ POE1Fixer.exe (the app)                         POE1FixerPluginHost.exe (one per
   cannot open the game or the app, start other processes, or send input to the game. A crash or a
   hang ends only the plugin, and the app restarts it after a back-off.
 - **Bounded.** Below-normal priority, a hard cap of 25 % of the machine's CPU, a quarter of the
-  logical processors, and the memory cap from `plugin.json` (256 MB for this plugin).
+  logical processors, and the memory cap from `plugin.json` (512 MB for this plugin).
 - **Read-only game data.** Before every callback the plugin gets its own copy of a read-only
   snapshot of the game, published by the app over shared memory: player, area, entities, buffs,
   inventory, camera, map UI.
@@ -46,7 +46,8 @@ only plugins you trust, and say in your plugin's description what it reads and w
 
 Taken by the app's `--pluginshot` tool (a debug build only): the plugin runs in the real plugin
 host and sandbox, fed a synthetic in-game snapshot (The Coast, 45 entities, buffs, inventory, map
-rectangles; made-up bytes behind the memory anchors), and the app's render plane draws its panel
+elements, a made-up area terrain and quest log for the radar; made-up bytes behind the memory
+anchors), and the app's render plane draws its panel
 in the dark theme and its overlay over a neutral backdrop. No game was running.
 
 ![Lifecycle: the five parts of a page, and every callback's calls, rate and cost](Plugins/ExamplePlugin/docs/screenshots/lifecycle.png)
@@ -100,6 +101,7 @@ own compiled code.
 | **Advanced** | 21 | Memory (`memory`) | Read the game's memory directly, read-only, for what the snapshot does not carry. | [Memory.cpp](Plugins/ExamplePlugin/src/lessons/Memory.cpp) |
 |  | 22 | Performance & limits (`performance`) | What this plugin costs, and every limit the app enforces, side by side. | [Performance.cpp](Plugins/ExamplePlugin/src/lessons/Performance.cpp) |
 |  | 23 | Threads & errors (`threads`) | Do slow work on a thread of your own, and see what happens when a callback throws. | [Threads.cpp](Plugins/ExamplePlugin/src/lessons/Threads.cpp) |
+|  | 24 | Build a radar (`maprad`) | Your own radar on the game's large map, on its minimap or in a panel: the area's walls, the entities by kind, the player, the exits. | [MapRadar.cpp](Plugins/ExamplePlugin/src/lessons/MapRadar.cpp) |
 
 The plugin's own README, [Plugins/ExamplePlugin/README.md](Plugins/ExamplePlugin/README.md), explains
 how the code is laid out, the overlay layers, and its `settings.json`.
@@ -176,7 +178,7 @@ The plugin keeps its settings in `<POE1Fixer folder>\Configs\plugins\data\exampl
 
 ## Permissions
 
-`plugin.json` asks for `"memory"` and `"input"`. The Plugins tab shows both to the user.
+`plugin.json` asks for `"memory"` and `"input"` and `"radar"`. The Plugins tab shows each of them to the user.
 
 - **memory**: read-only reads of the game's memory. Only the Memory lesson uses it, and only while its
   page is open: the PE header at the game module's base address, the snapshot's anchor addresses,
@@ -184,6 +186,10 @@ The plugin keeps its settings in `<POE1Fixer folder>\Configs\plugins\data\exampl
 - **input**: inert until you turn on **Allow input** for this plugin. Even then the plugin sends
   input only when you arm the Input lesson's safe demo: three one-second waits, then one mouse move
   to the centre of the game window. It never clicks and never presses a key.
+- **radar**: the app runs its radar reads while the plugin runs and hands it each area's terrain
+  (walkable grid, heights, tiles, rooms) and a radar block in every snapshot. Only the "Build a
+  radar" lesson uses them, and it draws over the game only when you tick "Draw the radar". Free for
+  every key; it needs a POE1Fixer that knows the permission (an older one refuses the plugin).
 
 The plugin uses no network.
 

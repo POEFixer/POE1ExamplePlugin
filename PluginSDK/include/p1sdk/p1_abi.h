@@ -42,6 +42,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "p1_snapshot.h"
+#include "p1_radar.h"
+#include "p1_terrain.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,10 +64,16 @@ extern "C" {
 #define P1_HAS_FIELD(p, type, field) \
     ((p) != NULL && (p)->size_bytes >= (uint32_t)(offsetof(type, field) + sizeof(((type*)0)->field)))
 
-/* ---- permissions (manifest "permissions": ["memory", "input"]) ---------- */
+/* ---- permissions (manifest "permissions": ["memory", "input", "radar"]) - */
 enum {
     P1_PERM_MEMORY = 1u << 0,   /* read_memory / read_memory_batch work        */
-    P1_PERM_INPUT  = 1u << 1    /* submit_input works (needs user consent too)  */
+    P1_PERM_INPUT  = 1u << 1,   /* submit_input works (needs user consent too)  */
+    P1_PERM_RADAR  = 1u << 2    /* the app runs its radar reads for you while you
+                                   run (map elements, minimap icons, exits, quest
+                                   log: p1_radar.h) and maps the area terrain into
+                                   your process (P1Frame.terrain, p1_terrain.h).
+                                   Needs an app that knows it: an older app refuses
+                                   the manifest (set the catalog's min_app_version). */
 };
 
 /* ---- log levels ----------------------------------------------------------- */
@@ -106,7 +114,9 @@ enum {
     P1_EV_PERMISSIONS       = 8,  /* a = new effective P1_PERM_* bits (input consent toggled) */
     P1_EV_LANGUAGE          = 9,  /* P1HostApi.language changed (re-read it)                  */
     P1_EV_GAME_FOCUS        = 10, /* a = 1 game window became foreground, 0 lost it           */
-    P1_EV_INPUT_GATE        = 11  /* a = 1 the app accepts input requests now, 0 refuses      */
+    P1_EV_INPUT_GATE        = 11, /* a = 1 the app accepts input requests now, 0 refuses      */
+    P1_EV_TERRAIN_CHANGED   = 12  /* a new area terrain arrived (P1_PERM_RADAR; a = its serial):
+                                     rebuild what you derive from P1Frame.terrain             */
 };
 
 typedef struct P1Event {
@@ -130,7 +140,22 @@ typedef struct P1Frame {
     uint32_t overlay_enabled;       /* 1 when your overlay output will be shown        */
     uint32_t permissions;           /* effective P1_PERM_* right now                    */
     uint32_t input_allowed;         /* 1 when submit_input would be accepted right now */
+    /* ---- appended: check P1_HAS_FIELD(f, P1Frame, terrain) (an older host has none) -- */
+    uint32_t _pad1;
+    const P1Terrain* terrain;       /* the newest area terrain (P1_PERM_RADAR), NULL before
+                                       the first one or without the permission. Valid until
+                                       the callback returns; it can be the PREVIOUS area's
+                                       while the new one is built: p1_terrain_current().  */
 } P1Frame;
+
+/* The frame's terrain when it is the snapshot's CURRENT area's (its serial matches the radar
+   block's terrain_serial), else NULL. */
+static inline const P1Terrain* p1_terrain_current(const P1Frame* f) {
+    if (!P1_HAS_FIELD(f, P1Frame, terrain) || !f->terrain) return NULL;
+    const P1Radar* r = p1_radar_get(f->snapshot);
+    if (!r || r->terrain_serial == 0 || r->terrain_serial != f->terrain->serial) return NULL;
+    return f->terrain;
+}
 
 /* ---- input requests (P1_PERM_INPUT + the user's consent) ------------------
  * The app performs the actions in order, on its own input thread, ONLY while:
@@ -229,6 +254,14 @@ typedef struct P1HostApi {
     void     (P1_CALL *request_frames)(void* host, uint32_t overlay_fps);
 
     int64_t  (P1_CALL *now_us)(void* host);
+
+    /* ---- appended: check P1SDK_HOST_HAS / P1_HAS_FIELD(api, P1HostApi, terrain_hold) ----
+       The newest terrain (P1_PERM_RADAR) with one reference taken, or NULL. It stays valid
+       until you pass it to terrain_release, on ANY thread (build a texture on a worker).
+       Every hold needs exactly one release. A held terrain counts against your process's
+       memory limit: release the old one when P1_EV_TERRAIN_CHANGED arrives. */
+    const P1Terrain* (P1_CALL *terrain_hold)(void* host);
+    void     (P1_CALL *terrain_release)(void* host, const P1Terrain* terrain);
 } P1HostApi;
 
 /* ---- callbacks, filled by the plugin in P1_CreatePlugin ------------------- */

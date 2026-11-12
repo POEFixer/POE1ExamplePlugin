@@ -1,6 +1,6 @@
 # SDK Example — a guided tour of the POE1Fixer plugin SDK
 
-The reference plugin for the POE1Fixer plugin SDK (ABI v1). It is a tour in 23 lessons: open
+The reference plugin for the POE1Fixer plugin SDK (ABI v1). It is a tour in 24 lessons: open
 its panel in the app's **Plugins** tab, pick a lesson on the left, and the page shows one part of
 the SDK working on live game data.
 
@@ -29,7 +29,8 @@ reads, debugging, versioning, FAQ) is [docs/PluginDevelopmentGuide.md](../../doc
 
 Taken by the app's `--pluginshot` tool (a debug build only): the plugin runs in the real plugin
 host and sandbox, fed a synthetic in-game snapshot (The Coast, 45 entities, buffs, inventory, map
-rectangles; made-up bytes behind the memory anchors), and the app's render plane draws its panel
+elements, a made-up area terrain and quest log for the radar; made-up bytes behind the memory
+anchors), and the app's render plane draws its panel
 in the dark theme and its overlay over a neutral backdrop. No game was running.
 
 ![Lifecycle: the five parts of a page, and every callback's calls, rate and cost](docs/screenshots/lifecycle.png)
@@ -67,7 +68,7 @@ snippet.*
 | 9 | Entities (`entities`) | [Entities.cpp](src/lessons/Entities.cpp) | Filtered, sorted, clipped entity table; every field of one entity; a selection ring on the overlay |
 | 10 | Buffs (`buffs`) | [Buffs.cpp](src/lessons/Buffs.cpp) | Buff timers, charges, flask slots (gated: AutoPot) |
 | 11 | Inventory (`inventory`) | [Inventory.cpp](src/lessons/Inventory.cpp) | The 12 x 5 grid from `inv_occupied` and the item array |
-| 12 | Map UI (`mapui`) | [MapUi.cpp](src/lessons/MapUi.cpp) | The large map and minimap rectangles, drawn to scale (gated: radar) |
+| 12 | Map UI (`mapui`) | [MapUi.cpp](src/lessons/MapUi.cpp) | The minimap's rectangle and the large map's centre and scale (its `pos` is the centre, its size reads 0 x 0), drawn to scale (gated: radar) |
 | | **Drawing** | | |
 | 13 | Overlay gallery (`overlay`) | [Overlay.cpp](src/lessons/Overlay.cpp) | Ten overlay layers, each with its own colour and size, and a HUD card with a legend |
 | 14 | World → screen (`w2s`) | [WorldToScreen.cpp](src/lessons/WorldToScreen.cpp) | `p1::WorldToScreen`, the camera, a point to move by hand, a projected 5 x 5 ground grid |
@@ -82,10 +83,13 @@ snippet.*
 | 21 | Memory (`memory`) | [Memory.cpp](src/lessons/Memory.cpp) | The PE header at `module_base`, a `ReadBatch` of the anchors, a hex viewer, a pointer-chain reader |
 | 22 | Performance & limits (`performance`) | [Performance.cpp](src/lessons/Performance.cpp) | This plugin's costs, every budget the app enforces side by side, a bounded overlay stress test |
 | 23 | Threads & errors (`threads`) | [Threads.cpp](src/lessons/Threads.cpp) | A worker thread done right, which calls work from which thread, an exception thrown inside OnPanel |
+| 24 | Build a radar (`maprad`) | [MapRadar.cpp](src/lessons/MapRadar.cpp) | A radar of your own (permission `radar`): the area's walls as one texture (`p1::TerrainTexture`), entities by the app's radar category, the player, the exits, on the game's large map, its minimap or a panel; why there is data or not (gate and stages); a live preview in the panel |
 
 The overlay layers (ids, used by settings.json): `markers`, `health`, `ring`, `lines`, `arrows`,
 `hud`, `labels`, `tooltip`, `radar`, `sprite` (Overlay gallery), `grid` (World → screen),
-`selection` (Entities).
+`selection` (Entities). The Build a radar lesson is not a layer: its radar on the game's maps has a
+switch of its own, `lessons.maprad.on` (so `"all": true` leaves it off), and the lesson id is
+`maprad`, not `radar` (the mini radar layer above).
 
 ## How the code is laid out
 
@@ -155,7 +159,8 @@ DLL names only the PDB's file name). Keep the PDB of every build you ship: crash
 
 ## Permissions
 
-`plugin.json` asks for `"permissions": ["memory", "input"]`:
+`plugin.json` asks for `"permissions": ["memory", "input", "radar"]` (and `"memoryLimitMB": 512`, for the
+area terrain and its texture):
 
 - **memory**: read-only game memory reads. Used only by the Memory lesson, and only while its page
   is open: the PE header at `module_base`, the snapshot's anchors, and the addresses and offsets
@@ -163,6 +168,11 @@ DLL names only the PDB's file name). Keep the PDB of every build you ship: crash
 - **input**: inert until you tick **Allow input** for this plugin in the Plugins tab. Even then the
   plugin sends input only when you arm the Input lesson's safe demo: three one-second waits and one
   mouse move to the centre of the game window. It never clicks and never presses a key.
+- **radar**: free for every key. While the plugin runs the app runs its radar reads (map elements,
+  minimap icons, exits, the quest log: the snapshot's radar block, `p1_radar.h`) and maps each area's
+  terrain into the plugin's process (`P1Frame.terrain`, `p1_terrain.h`). Used by the Build a radar
+  lesson; the map rectangles of the Map UI lesson come with it. An app older than the radar SDK
+  refuses a `plugin.json` that lists `radar`: publish such a plugin with `min_app_version`.
 
 The plugin uses no network.
 
@@ -173,14 +183,17 @@ The plugin uses no network.
   "lesson": "overlay",
   "layers": { "markers": true, "health": false, "ring": true },
   "layerStyle": { "markers": { "color": [0.95, 0.36, 0.30, 0.90], "size": 8 } },
-  "lessons": { "lifecycle": { "requestFps": 0 }, "keyboard": { "hotkey": 118, "toggles": "hud" } }
+  "lessons": { "lifecycle": { "requestFps": 0 }, "keyboard": { "hotkey": 118, "toggles": "hud" },
+               "maprad": { "on": true, "map": "auto", "filled": false, "border": 1 } }
 }
 ```
 
 - `lesson`: the open lesson (one of the ids above); missing or unknown means `lifecycle`.
 - `layers`: overlay layer id to on / off. `"all": true` is a developer switch (the screenshot tool
   uses it): every layer on, applied once; the next save writes the single switches instead.
-- `layerStyle`: each layer's colour and size. `lessons`: each lesson's own options.
+- `layerStyle`: each layer's colour and size. `lessons`: each lesson's own options (`maprad`: `on`,
+  `map` = `auto` | `large` | `mini` | `panel`, `filled`, `border` 0..3, `color`, `zoom`, `monsters`,
+  `chests`, `league`).
 - Every value is read defensively (type checked, range clamped). A file that is not valid JSON is
   kept as `settings.json.rejected` and the defaults apply; the Settings lesson demonstrates it.
 

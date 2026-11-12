@@ -1,8 +1,8 @@
 /* ============================================================================
  * p1_snapshot.h — the read-only game snapshot a plugin receives, v1.
  *
- * POE1Fixer's worker reads the game; a low-priority publisher thread in the app
- * converts each new worker snapshot into this flat, pointer-free layout and
+ * POE1Fixer's worker reads the game; a publisher thread in the app (normal
+ * priority, on purpose) converts each new worker snapshot into this flat, pointer-free layout and
  * writes it into a shared-memory section that every plugin process maps
  * READ-ONLY. The plugin host copies the newest complete slot into private
  * memory before each callback, so a P1Snapshot* handed to a plugin is stable
@@ -10,15 +10,19 @@
  *
  * Layout rules (append-only, versioned):
  *   - All offsets are byte offsets from the start of the P1Snapshot.
- *   - Arrays carry their own stride: index with P1_ENTITY(s, i) etc., never
- *     with ((P1Entity*)base)[i], so a newer app can grow the element structs.
+ *   - Arrays carry their own stride: index with p1_entity_at(s, i) etc., never
+ *     with ((P1Entity*)base)[i]. The v1 elements (P1Entity, P1Buff,
+ *     P1InventoryItem) can never grow: their accessors compare the stride with
+ *     sizeof. Arrays added later (p1_radar.h) compare with a fixed P1_*_V1_BYTES
+ *     constant instead, so those elements can grow at the end.
  *   - Strings are p1_str offsets into the string pool; 0 is the empty string.
  *     Read them with p1_str_get(), which bounds-checks.
  *   - header_bytes says how much of P1Snapshot the app wrote. A field added
  *     in a later SDK exists only when P1_SNAP_HAS(s, field) — an older app
  *     never wrote it (the bytes there belong to the arrays).
  *   - Anything marked "gate" is filled only while an app feature that owns
- *     the read (radar, AutoPot) is running; its P1_SNAP_* flag says so.
+ *     the read (radar, AutoPot) is running; its P1_SNAP_* flag says so. The
+ *     radar reads also run while any plugin with the "radar" permission runs.
  * ========================================================================== */
 #ifndef P1SDK_P1_SNAPSHOT_H
 #define P1SDK_P1_SNAPSHOT_H
@@ -58,7 +62,9 @@ enum {
     P1_SNAP_CAMERA_VALID   = 1u << 9,   /* camera block below is valid                     */
     P1_SNAP_BUFFS_VALID    = 1u << 10,  /* player buffs were read this tick (gate: AutoPot) */
     P1_SNAP_MAP_VALID      = 1u << 11,  /* large_map / mini_map were read (gate: radar)    */
-    P1_SNAP_INVENTORY_VALID= 1u << 12   /* main inventory (12x5) is valid                  */
+    P1_SNAP_INVENTORY_VALID= 1u << 12,  /* main inventory (12x5) is valid                  */
+    P1_SNAP_RADAR_VALID    = 1u << 13   /* the radar reads ran this tick: the radar block's
+                                           data is fresh (p1_radar.h; needs a newer app)    */
 };
 
 /* ---- entity kinds / component bits (mirror the app's EntityKind/EntityComp) */
@@ -144,7 +150,16 @@ typedef struct P1Camera {        /* sampled by the worker next to the entities  
     int32_t  viewport_w, viewport_h;
 } P1Camera;
 
-typedef struct P1MapElement {    /* UI base units (2560x1600, height-fit); px = base * clientH/1600 */
+/* One of the game's two map elements (gate: radar). Units are MIXED, as the game keeps them:
+ *   pos_base / size_base: UI base units (2560x1600, height-fit); px = base * client_h/1600.
+ *     The MINIMAP is a real rectangle: pos = its top-left, size = its size.
+ *     The LARGE MAP is not: its pos is the map CENTRE and its size reads 0x0 (live 2026-11-02).
+ *   scale_rel: element scale / root scale (multiply by client_h/1600 for px per base unit).
+ *   shift / default_shift: the game's raw sub-map fields, in client PIXELS (not base units).
+ *   zoom: the sub-map zoom (0 = unusable).
+ * Do not do this math by hand: p1_radar.h has p1_large_map_transform / p1_mini_map_transform,
+ * the projection the app's own radar uses (with the user's calibration). */
+typedef struct P1MapElement {
     uint8_t  valid, visible, _pad0[2];
     float    pos_base_x, pos_base_y, size_base_x, size_base_y;
     float    scale_rel;
@@ -203,6 +218,12 @@ typedef struct P1Snapshot {
     uint32_t buff_count, buff_stride, buff_offset, _pad2;
     uint32_t item_count, item_stride, item_offset, _pad3;
     uint32_t string_offset, string_bytes;   /* pool; byte 0 is always '\0'               */
+
+    /* ---- appended (radar data for plugins). Present only when P1_SNAP_HAS(s, radar_bytes):
+       an older app never wrote these bytes. Read the block with p1_radar_get() (p1_radar.h). */
+    uint32_t radar_offset, radar_bytes;     /* the P1Radar struct itself (offset, its size);
+                                               its arrays are placed by its own *_offset
+                                               fields. 0 = no radar block                    */
 } P1Snapshot;
 
 /* ---- accessors ------------------------------------------------------------- */

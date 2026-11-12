@@ -4,8 +4,9 @@ Plugin ABI **v1** (`P1_ABI_VERSION 1`, `P1_SNAPSHOT_VERSION 1`), Dear ImGui **1.
 Russian version: [PluginDevelopmentGuide_ru.md](PluginDevelopmentGuide_ru.md).
 
 The authoritative contract is the C headers in `PluginSDK\include\p1sdk\` (`p1_abi.h`,
-`p1_snapshot.h`). `p1sdk.hpp` is a header-only C++ wrapper over them, and this guide describes
-the wrapper. The reference plugin is `Plugins\ExamplePlugin\`. Start from a copy of it.
+`p1_snapshot.h`, and for radar data `p1_radar.h` and `p1_terrain.h`). `p1sdk.hpp` is a header-only
+C++ wrapper over them, and this guide describes the wrapper. The reference plugin is
+`Plugins\ExamplePlugin\`. Start from a copy of it.
 
 Contents:
 1. [What a plugin is, and what you are guaranteed](#1-what-a-plugin-is-and-what-you-are-guaranteed)
@@ -18,10 +19,11 @@ Contents:
 8. [Settings and files](#8-settings-and-files)
 9. [Input requests](#9-input-requests)
 10. [Game memory reads](#10-game-memory-reads)
-11. [Logging, toasts and the clipboard](#11-logging-toasts-and-the-clipboard)
-12. [Debugging](#12-debugging)
-13. [ABI and versioning rules](#13-abi-and-versioning-rules)
-14. [FAQ and troubleshooting](#14-faq-and-troubleshooting)
+11. [Building a radar](#11-building-a-radar)
+12. [Logging, toasts and the clipboard](#12-logging-toasts-and-the-clipboard)
+13. [Debugging](#13-debugging)
+14. [ABI and versioning rules](#14-abi-and-versioning-rules)
+15. [FAQ and troubleshooting](#15-faq-and-troubleshooting)
 
 ---
 
@@ -48,6 +50,9 @@ What you get:
   settings panel inside the app's **Plugins** tab.
 - **Services:** logging, toasts, the clipboard, textures, and with permission, read-only game
   memory reads and keyboard/mouse requests.
+- **Radar data**, with the `radar` permission: the current area's terrain and everything the
+  app's own radar draws from, so you can build a radar of your own. See
+  [section 11](#11-building-a-radar).
 
 What is guaranteed:
 - **A crash kills only your plugin.** That covers an access violation, stack overflow,
@@ -65,8 +70,10 @@ What is guaranteed:
   may also run only on the **highest-numbered quarter of the logical CPUs** (the same quarter for
   every plugin; on hybrid Intel processors these are the efficiency cores), so even threads you
   raise to the highest priority can never occupy the CPUs the app works on. The game snapshot is
-  built once per game-reader tick by a below-normal thread and shared by all plugins. No plugin
-  can change the reader's cadence or turn on any of the app's game reads. Each plugin gets at most
+  built once per game-reader tick by one app thread and shared by all plugins. No plugin can
+  change the reader's cadence or turn on any of the app's game reads, with one exception: while a
+  plugin with the `radar` permission runs, the app performs the reads of its own radar, at the
+  radar's cadence, exactly as when the user's radar is on (section 11). Each plugin gets at most
   about **30 ms per second** of the app's service thread (the thread that validates your frames
   and reads your requests); past that, your frames and requests wait for the next second. The
   app's render thread only copies draw data the app has already validated, within fixed limits per
@@ -92,7 +99,7 @@ process. In practice this means:
 | send keyboard or mouse input to the game or the app (`SendInput`, `PostMessage`) | Windows UIPI blocks input into higher-integrity windows. Use `p1::Input` (section 9) |
 | open another plugin's process, threads or token: read or write its memory, take its handles, suspend or kill it, run code in it, change its token | every plugin's process, primary thread and token, and every thread it starts, grant other processes of the same user only harmless rights: wait on them, read their security descriptor, query basic information (and query a token) |
 | start processes (`CreateProcess`, `ShellExecute`, opening a URL in the browser) | the Job allows one process. `CreateProcess` fails with error 1816 (`ERROR_NOT_ENOUGH_QUOTA`) |
-| use the clipboard directly | the Job's UI limits. Use `p1::SetClipboard` (section 11); text the user pastes into your panel arrives through the app |
+| use the clipboard directly | the Job's UI limits. Use `p1::SetClipboard` (section 12); text the user pastes into your panel arrives through the app |
 | use more than its memory cap or more than 25 % of the machine's CPU, or run on more than its quarter of the logical CPUs | Job limits. Over the memory cap, allocations fail; a thread affinity outside the quarter is refused |
 | change display settings or system parameters, log off the user, use global atoms, use window handles of processes outside its Job, or switch desktops | the Job's UI limits |
 
@@ -102,6 +109,7 @@ process. In practice this means:
 | **use the network** (sockets, HTTP) | not restricted |
 | start its own threads | see [section 5](#5-lifecycle-and-threads) |
 | read game memory, read-only, with the `memory` permission | the host holds a handle with `PROCESS_VM_READ` only |
+| receive the current area's terrain, with the `radar` permission | a second shared section, mapped read-only, that the app hands only to plugins with that permission (section 11) |
 | **read and write the data folder of another plugin** | a known limitation, see below |
 
 **Objects your plugin creates** (threads, events, mutexes, sections, ...) get the same protection
@@ -145,7 +153,7 @@ the repository, mirror what `ExamplePlugin.vcxproj` does:
 - Ship a **Release** build. A Debug build (`/MDd`) needs the debug C runtime DLLs, which exist only
   on machines with Visual Studio installed.
 - Generate a **PDB in Release too** and keep the PDB of every build you ship: it is what turns a
-  user's crash dump into a call stack (section 12). The example links with `/DEBUG` and
+  user's crash dump into a call stack (section 13). The example links with `/DEBUG` and
   `/PDBALTPATH:%_PDB%`, so the DLL records only the PDB's file name and no path of your machine.
 
 ### A minimal plugin
@@ -263,7 +271,10 @@ skips any other entry. The tools are in the POE1Fixer source repository, under `
    `folder`, `asset`, `zip`, `min_app_version`, optional `changes` and `i18n`), then run
    `python tools/plugin_sdk/gen_catalog.py --out <your clone of POE1PluginCatalog>`. It takes
    every field the app shows from the zip itself and writes `catalog.json` and `README.md`.
-   `--check` only compares.
+   `--check` only compares. A plugin that lists the `radar` permission needs an app that knows
+   it: an older app refuses its manifest (`unknown permission "radar"`) and its catalog reader
+   skips the entry. Set `min_app_version` to the first POE1Fixer version that has radar data for
+   plugins.
 5. Check the result with the app's own code: run a Dbg build of the app (its version at least the
    entry's `min_app_version`) as `POE1Fixer.exe --plugincatalogcheck <catalog.json> <zip> [<zip> ...]`.
    It parses the catalog, matches each zip to its entry by size and SHA-256, extracts it the way
@@ -319,13 +330,26 @@ ignored, so a newer SDK can add optional fields.
 | `description` | string | no | at most 512 bytes | `""` |
 | `dll` | string | yes | a bare file name ending in `.dll` (any case), 5..200 bytes; no path separator, `:`, `*`, `?`, `"`, `<`, `>`, `\|` or `..`; does not start with `.` or a space; no space or `.` right before `.dll`; not a device name. The file must exist in the plugin folder | |
 | `sdk` | integer | yes | must equal the app's `P1_ABI_VERSION` (1) | |
-| `permissions` | array of strings | no | at most 16 entries, each `"memory"` or `"input"`. Any other string is an error, so a plugin that needs a right this app cannot grant never runs half-working | `[]` |
+| `permissions` | array of strings | no | at most 16 entries, each `"memory"`, `"input"` or `"radar"` (below). Any other string is an error, so a plugin that needs a right this app cannot grant never runs half-working | `[]` |
 | `overlay` | bool | no | `false`: your overlay is never shown and `OnOverlay` is never called | `true` |
 | `panel` | bool | no | `false`: no settings panel and `OnPanel` is never called | `true` |
 | `maxFps` | integer | no | 1..144, the most overlay frames per second | `60` |
 | `memoryLimitMB` | integer | no | 128..4096, the Job's memory cap for your process | `1024` |
 
 Every text field must be valid UTF-8 with no control characters.
+
+**Permissions.** Each one is shown to the user as a chip on the plugin's card in the Plugins tab
+and in the catalog:
+
+| Permission | Constant | What it gives | Chip | Needs the user's consent |
+|---|---|---|---|---|
+| `"memory"` | `P1_PERM_MEMORY` | read-only reads of game memory (section 10) | Reads game memory | no |
+| `"input"` | `P1_PERM_INPUT` | keyboard and mouse requests (section 9) | Keyboard and mouse | yes: **Allow input**, off by default |
+| `"radar"` | `P1_PERM_RADAR` | while your plugin runs, the app performs its radar reads; you receive the area terrain and the radar data (section 11). Free whatever licence the user has | Map and radar data | no |
+
+`"radar"` exists only in apps that ship the radar SDK (`p1_radar.h`, `p1_terrain.h`). An older app
+refuses a manifest that lists it, with `unknown permission "radar"`, so publish such a plugin with
+the catalog's `min_app_version` set (section 3).
 
 **Errors.** A bad manifest puts the plugin in the **Invalid** state, and the reason becomes the
 state detail. Examples:
@@ -377,10 +401,12 @@ The host's main thread is your plugin thread. Each turn of its loop does this:
 4. If the app published a new snapshot, copy it privately, then derive the snapshot events in this
    order: `P1_EV_DETACHED`, `P1_EV_ATTACHED`, `P1_EV_STATE_CHANGED`, `P1_EV_AREA_CHANGED`,
    `P1_EV_CHARACTER_CHANGED`.
-5. Call `OnEvent` once per event, in that order.
-6. Call `OnTick` if a new snapshot arrived or 100 ms have passed since the last tick.
-7. Call `OnOverlay` if an overlay frame is due, then `OnPanel` if a panel frame is due.
-8. Publish the frames.
+5. With the `radar` permission: if the app published a new area terrain, copy it privately and
+   queue `P1_EV_TERRAIN_CHANGED` (section 11).
+6. Call `OnEvent` once per event, in that order.
+7. Call `OnTick` if a new snapshot arrived or 100 ms have passed since the last tick.
+8. Call `OnOverlay` if an overlay frame is due, then `OnPanel` if a panel frame is due.
+9. Publish the frames.
 
 The loop sleeps until the app wakes it (a new snapshot, input, a control change) or the next frame
 is due, and never longer than 250 ms.
@@ -388,7 +414,7 @@ is due, and never longer than 250 ms.
 | Callback | When it runs |
 |---|---|
 | `OnEvent` | before the `OnTick` of the same iteration, once per event |
-| `OnTick` | on every new snapshot (the game reader's cadence: about 30 per second, about 60 while the app's radar runs; plugins never change it), and at least 10 times a second otherwise, for example while detached. Check `snapshot->publish_seq` to tell whether the data is new |
+| `OnTick` | on every new snapshot (the game reader's cadence: about 30 per second, about 60 while the radar reads run, that is while the app's radar is on or a plugin with the `radar` permission runs; nothing else a plugin does changes it), and at least 10 times a second otherwise, for example while detached. Check `snapshot->publish_seq` to tell whether the data is new |
 | `OnOverlay` | when the manifest has `"overlay": true`, the plugin is enabled and the game window is known, on a new snapshot, a client-size or UI-scale change, or the rate you asked for with `p1::RequestFrames(fps)`. Never more often than `maxFps` |
 | `OnPanel` | only while your panel is visible in the Plugins tab: about 30 times a second when idle, up to about 60 times a second while the user interacts with it |
 
@@ -410,6 +436,7 @@ Building frames faster than that only spends your own CPU share.
 | `P1_EV_LANGUAGE` | | the app's UI language changed: re-read `Language()` |
 | `P1_EV_GAME_FOCUS` | a = 1 / 0 | the game window became the foreground window, or stopped being it |
 | `P1_EV_INPUT_GATE` | a = 1 / 0 | the app now accepts, or refuses, input requests |
+| `P1_EV_TERRAIN_CHANGED` | a = the terrain's `serial` | `radar` permission only: a new area terrain arrived and `P1Frame::terrain` now points at it. Rebuild what you derive from it (section 11). Needs an app with radar data |
 
 ```cpp
 void OnEvent(const P1Event& e) override {
@@ -425,9 +452,10 @@ void OnEvent(const P1Event& e) override {
 
 - You may start threads (`std::thread`, a thread pool). Do anything slow there: file I/O, the
   network, heavy computation. A callback that blocks for 5 s kills the plugin.
-- The host functions `Log`, `Notify`, `SetClipboard`, `RequestFrames`, `NowUs`, `Memory::*` and
-  `Input::*` may be called from **any** thread. The `Texture::*` functions work **only on the
-  plugin thread**: elsewhere they return 0 / `false` and do nothing.
+- The host functions `Log`, `Notify`, `SetClipboard`, `RequestFrames`, `NowUs`, `Memory::*`,
+  `Input::*` and the terrain references (`p1::TerrainRef`, section 11) may be called from **any**
+  thread. The `Texture::*` functions work **only on the plugin thread**: elsewhere they return 0 /
+  `false` and do nothing.
 - **ImGui only inside `OnOverlay` and `OnPanel`**, on the plugin thread. The host binds its ImGui
   context to your DLL right before each of those two calls. ImGui calls anywhere else touch a
   context that is not in a frame.
@@ -470,6 +498,7 @@ Every `OnTick`, `OnOverlay` and `OnPanel` gets a `const P1Frame&`:
 | `overlay_enabled` | 1 when your overlay output will be shown |
 | `permissions` | the effective `P1_PERM_*` right now. `P1_PERM_INPUT` is set only when the user also consented. Test with `p1::HasPermission(f, P1_PERM_MEMORY)` |
 | `input_allowed` | 1 when `submit_input` would be accepted right now (section 9) |
+| `terrain` | appended field: test `P1_HAS_FIELD(&f, P1Frame, terrain)` first, an older host has none. The newest area terrain (`radar` permission only), null before the first one and without the permission. Valid until the callback returns; while a new area's terrain is still being built it is the PREVIOUS area's, so read it through `p1_terrain_current(&f)` (section 11) |
 
 `HostApi().permissions` (`ManifestPermissions()`) is what the manifest granted. It never changes
 while the plugin runs. The live value is the one in `P1Frame::permissions`.
@@ -512,12 +541,13 @@ The app samples the keys about 60 times a second, so a tap shorter than one samp
 | `area` | `P1Area`, below |
 | `player` | `P1Player`, below |
 | `camera` | `view_proj[16]` + `viewport_w/h`. Valid with `P1_SNAP_CAMERA_VALID`. Use it through `p1::WorldToScreen` |
-| `large_map`, `mini_map` | the game's map UI rectangles (`P1MapElement`). **Gated: radar** (`P1_SNAP_MAP_VALID`) |
+| `large_map`, `mini_map` | the game's two map elements (`P1MapElement`, below). **Gated: radar** (`P1_SNAP_MAP_VALID`) |
 | `latency_ms`, `gold`, `time_in_game_ms`, `network_state`, `league` | server values (`league` is a string) |
 | `inv_cols`, `inv_rows`, `inv_occupied` | the main inventory grid (12 x 5) and its occupancy bits, bit `y * cols + x`. Valid with `P1_SNAP_INVENTORY_VALID` |
 | `entity_count/stride/offset`, `entity_truncated` | the entity array (below). `entity_truncated` is the number of entities left out because the snapshot was full |
 | `buff_count/stride/offset`, `item_count/stride/offset` | the buff and inventory-item arrays |
 | `string_offset`, `string_bytes` | the string pool |
+| `radar_offset`, `radar_bytes` | appended fields: present only when `P1_SNAP_HAS(s, radar_bytes)`. Where the radar block (`P1Radar`) is; 0 = none. Written while a plugin with the `radar` permission runs. Read it with `p1_radar_get(&s)` or `p1::Radar::Get(s)`, which test all of this (section 11) |
 
 ### Flags
 
@@ -536,19 +566,23 @@ The app samples the keys about 60 times a second, so a tap shorter than one samp
 | `P1_SNAP_BUFFS_VALID` | the player's buffs were read this tick. **Gated: AutoPot** |
 | `P1_SNAP_MAP_VALID` | `large_map` / `mini_map` were read. **Gated: radar** |
 | `P1_SNAP_INVENTORY_VALID` | the main inventory is valid |
+| `P1_SNAP_RADAR_VALID` | the radar reads ran this tick, so the radar block's data is fresh (section 11). Never set by an app without radar data |
 
 `flags == 0` means no game data at all: not attached yet, or the very first callback.
 
 **Gated fields.** Some reads cost the app time, so it does them only while one of its own
-features needs them. Plugins get these fields as a by-product and can never turn the reads on.
-Always test the flag or the "unknown" value, and degrade gracefully:
+features needs them. Plugins get these fields as a by-product. The one set of reads a plugin can
+turn on is the radar's: a running plugin with the `radar` permission makes the app perform them
+exactly as for its own radar (section 11). Always test the flag or the "unknown" value, and
+degrade gracefully:
 
 | Field | Filled only while |
 |---|---|
 | player buffs (`P1_SNAP_BUFFS_VALID`, `p1::PlayerBuffs`) | AutoPot reads them (it is enabled and running) |
-| `large_map`, `mini_map` (`P1_SNAP_MAP_VALID`) | the radar reads the map UI |
-| `P1Entity::targetable` (monsters only, 0xFF otherwise) | the radar runs. A value the radar already cached keeps being published |
-| `P1Entity::minimap_icon`, `transition_target`, `item_path` | the radar runs; cached values keep being published |
+| `large_map`, `mini_map` (`P1_SNAP_MAP_VALID`) | the radar reads run: the user's radar is on, or a plugin with the `radar` permission runs |
+| `P1Entity::targetable` (monsters only, 0xFF otherwise) | the radar reads run. A value the radar already cached keeps being published |
+| `P1Entity::minimap_icon`, `transition_target`, `item_path` | the radar reads run; cached values keep being published |
+| the radar block (`p1_radar_get`) and its arrays | your plugin has the `radar` permission (the host removes the block for any other plugin); its data is fresh on ticks with `P1_SNAP_RADAR_VALID` |
 
 ### P1Area and P1Player
 
@@ -563,14 +597,29 @@ reservation fields (`hp_reserved_flat`, `hp_reserved_fraction`, `mana_reserved_f
 array. Iterate the buffs with `p1::PlayerBuffs(s)`.
 
 `P1MapElement` (`large_map`, `mini_map`; radar-gated): `valid`, `visible`, `pos_base_x/y`,
-`size_base_x/y`, `scale_rel`, `shift_x/y`, `default_shift_x/y`, `zoom`. Positions and sizes are in
-the game's UI base units (2560 x 1600, fitted to the height): pixels = base x `client_h` / 1600.
+`size_base_x/y`, `scale_rel`, `shift_x/y`, `default_shift_x/y`, `zoom`. The units are mixed, the
+way the game keeps them:
+
+- `pos_base` and `size_base` are in the game's UI base units (2560 x 1600, fitted to the height):
+  pixels = base x `client_h` / 1600.
+- The **minimap** is a real rectangle: `pos_base` is its top-left corner, `size_base` its size.
+- The **large map** is not: its `pos_base` is the map's **centre**, and its `size_base` reads 0 x 0
+  (the radar block says so with `P1_RADAR_LARGE_POS_IS_CENTRE`).
+- `shift_x/y` and `default_shift_x/y` are the game's own sub-map offsets in **client pixels**, not
+  base units.
+- `scale_rel` is the element's scale relative to the UI root (multiply by `client_h` / 1600 for
+  pixels per base unit); `zoom` is the sub-map zoom, 0 = unusable.
+
+Do not do this math by hand: `p1::Radar::LargeMap(f)` / `p1::Radar::MiniMap(f)` (C:
+`p1_radar_large_map`, `p1_radar_mini_map`) return the transform the app's own radar uses, with
+the user's calibration (section 11).
 
 ### Arrays: entities, buffs, inventory items
 
-**Never index the arrays as C arrays.** A newer app may grow the element structs, so always go
-through the stride, with `p1::Entities(s)` / `p1::PlayerBuffs(s)` / `p1::InventoryItems(s)` or
-`p1_entity_at` / `p1_buff_at` / `p1_item_at`, which also bounds-check.
+**Never index the arrays as C arrays.** Always go through the stride, with `p1::Entities(s)` /
+`p1::PlayerBuffs(s)` / `p1::InventoryItems(s)` or `p1_entity_at` / `p1_buff_at` / `p1_item_at`,
+which also bounds-check. Which element structs may still grow, and why `P1Entity` may not, is in
+section 14.
 
 `P1Entity`:
 
@@ -596,6 +645,11 @@ buff), `charges`, `flask_slot`, `source_id`. At most 256 buffs.
 
 `P1InventoryItem`: `entity` (address), `x`, `y`, `w`, `h` (cells), `base_name`. At most 128.
 
+While the radar block is written, a parallel array of `P1EntityRadar` describes each entity the
+way the app's radar sees it (its category, icon cells, float grid position, terrain height):
+element i belongs to entity i. Read it with `p1::Radar::Entities(s)` or `p1_entity_radar_at(&s, i)`
+(section 11). Each entity then costs 20 more bytes of the snapshot slot.
+
 ### Strings
 
 Strings are `p1_str` byte offsets into the snapshot's string pool. 0 is the empty string. Read them
@@ -615,8 +669,10 @@ for (const P1Entity& e : p1::Entities(s))
 
 The snapshot is append-only. A field added in a later SDK exists only when
 `P1_SNAP_HAS(s, field)` is true: an older app never wrote it, and the bytes at that position belong
-to the arrays. Element structs only grow at the end; that is why strides exist. A plugin built
-against snapshot version N runs on any app that provides version N or later.
+to the arrays. `radar_offset` and `radar_bytes` are such fields: the header grew from 528 to 536
+bytes, and `p1_radar_get` returns null on an app that wrote 528. Element structs only grow at the
+end; that is why strides exist. A plugin built against snapshot version N runs on any app that
+provides version N or later. The rules for the element sizes are in section 14.
 
 ## 7. Drawing
 
@@ -732,6 +788,8 @@ if (m_tex) ImGui::Image(ImTextureRef(m_tex), ImVec2(64, 64));
 - If the app ever sees more than 64 MiB or more than 1024 textures live, or a texture larger than
   4096 px, the plugin is stopped as **Faulted** (`texture budget: ...`). Through `p1::Texture` you
   cannot get there: the host refuses first.
+- An image as big as an area's terrain has its own helper, `p1::TerrainTexture`, which builds it
+  off the plugin thread and keeps it inside these limits (section 11).
 
 ### Limits per frame
 
@@ -938,7 +996,435 @@ if (p1::HasPermission(f, P1_PERM_MEMORY) && s.player.address) {
   values are in range before you follow or use them. A failed read never crashes, but code that
   trusts garbage can.
 
-## 11. Logging, toasts and the clipboard
+## 11. Building a radar
+
+With the `radar` permission a plugin gets everything the app's own radar draws from, so it can
+draw a complete radar of its own: the area's walkable outline and relief, entity icons, exits and
+quest state, on the game's large map, on its minimap or in a panel of your own. It is **free**: it
+works whatever licence the user has (the app's built-in Radar stays a paid feature). The headers
+are `p1_radar.h` (the radar block and the projection) and `p1_terrain.h` (the area terrain);
+`p1sdk.hpp` wraps both in `p1::Radar`, `p1::TerrainRef` and `p1::TerrainTexture`.
+
+The SDK Example's lesson 24, **"Build a radar"** (`maprad`), is the full worked example: every piece
+of this section with live data and code to copy.
+
+### What the permission does
+
+In `plugin.json`, add `"radar"` to `permissions` (next to any others you need) and give the
+process room: `"memoryLimitMB": 512` or more (see the last point).
+
+- **The app performs its radar reads while your plugin runs:** the map elements, the minimap
+  icons, the exit targets, the ground-item paths, `targetable`, the quest log, the quest list and
+  the area terrain, exactly as for its own radar, at the radar's cadence (snapshots about 60 times
+  a second). The terrain is then built in towns and hideouts too: your plugin decides what to draw
+  there. Never in WGC mode. A plugin cannot make the app read more than that, and it never makes
+  the app's built-in radar draw or do work, nor moves the progress of its quest guide.
+- **Your process receives the area terrain** (`P1Frame::terrain`, `P1_EV_TERRAIN_CHANGED`,
+  `p1::TerrainRef`) through a second read-only shared section. The app hands that section only to
+  plugins with the permission: there is no other way to get the terrain.
+- **Your snapshot carries a radar block** (`P1Radar`). The app writes it while at least one running
+  plugin has the permission, and the plugin host removes it from the snapshot of every plugin that
+  does not have the permission: without `"radar"`, `p1_radar_get` returns `NULL` even while another
+  plugin's radar runs. (The v1 per-entity fields such as `minimap_icon` are filled whenever the
+  radar reads run, for every plugin, as before.)
+- **No consent is needed.** The Plugins tab shows the permission as a "Map and radar data" chip.
+- **It needs an app with radar data.** An older app refuses the manifest (`unknown permission
+  "radar"`, the plugin is Invalid). Set the catalog entry's `min_app_version` (section 3).
+- **Ask for memory.** Your process holds a private copy of each area's terrain (often 10 to
+  30 MB, up to 64 MiB), the terrain image while it is built, and the texture data on its way to
+  the app. 512 MB is a sound `memoryLimitMB`; the default 1024 is fine too.
+
+### What arrives, and when
+
+| Piece | Where | Read it with |
+|---|---|---|
+| radar block `P1Radar`: gate, stages, projection constants, the user's map calibration, the player, the icon atlas | the snapshot (`radar_offset`) | `p1::Radar::Get(s)`, `p1_radar_get(&s)` |
+| per-entity `P1EntityRadar` | parallel to the entity array | `p1::Radar::Entities(s)`, `p1_entity_radar_at(&s, i)` |
+| quest log `P1QuestState` | the snapshot | `p1::Radar::Quests(s)`, `p1_quest_at`, `p1_quest_find` |
+| quest list `P1QuestTrackerEntry` | the snapshot | `p1::Radar::Tracker(s)`, `p1_tracker_at` |
+| area terrain `P1Terrain` | `P1Frame::terrain`, `radar` plugins only | `p1_terrain_current(&f)`, `p1::TerrainRef`, `p1::TerrainTexture` |
+| `P1_EV_TERRAIN_CHANGED` (a = serial) | `OnEvent`, `radar` plugins only | |
+
+**The gate.** `P1Radar::gate` says whether the reads ran, and why not:
+
+| `gate` | Meaning |
+|---|---|
+| `P1_RGATE_ON` | the reads ran this tick; `P1_SNAP_RADAR_VALID` is set |
+| `P1_RGATE_NOT_IN_GAME` | wanted, but the game is not in an area: login, character select, a loading screen |
+| `P1_RGATE_WGC` | the app is in visual (WGC) mode: no game memory at all |
+| `P1_RGATE_OFF` | nobody wants them (for example just before the app has noticed your plugin) |
+
+`P1Radar::flags` adds who asked (`P1_RADAR_BY_APP`, `P1_RADAR_BY_PLUGIN`), `P1_RADAR_TERRAIN_REUSED`
+(the terrain was re-used after a portal round trip), the quest-log flags (below), and two
+projection switches (`P1_RADAR_LARGE_POS_IS_CENTRE`, `P1_RADAR_SHIFT_IN_BASE_UNITS`) that the
+transform helpers read for you.
+
+**The stages** mirror the app's own radar status:
+
+| Field | Values |
+|---|---|
+| `terrain_stage` | `P1_TSTAGE_OFF`, `READING`, `COMPOSING` (heights being combined off-thread), `READY`; `DEFERRED` while the app's trade automation holds the reads; failures `HEADER_BAD`, `SHAPE_REJECTED`, `READ_FAILED`. Progress: `sub_tiles_read` / `sub_tiles_total`, `tgt_read` / `tgt_total`, `terrain_build_ticks`, `terrain_ticks_deferred` |
+| `map_ui_stage` | `P1_MAPUI_OK`; `DEFERRED` = a trade holds the reads and the last state is carried: use it like OK; `OFFSETS_PENDING`, `MAP_ELEMENT_BAD`, `OFF` |
+| `quest_stage` | `P1_QSTAGE_OK`; `UI_BAD`, `NOT_FOUND`, `WALK_FAILED`, `DEFERRED`, `OFF` |
+| `tracker_stage` | `P1_TRSTAGE_OK`; `WAITING` (the quest log is not read yet), `NO_ELEMENT`, `HIDDEN`, `DEFERRED`, `OFF` |
+
+**Entering an area.**
+
+1. `P1_EV_AREA_CHANGED` arrives and `snapshot->area` describes the new area. The block's
+   `terrain_serial` reads 0 while the new terrain is built, and `terrain_stage` moves through
+   `READING` and `COMPOSING`.
+2. Some seconds later the build is done: `terrain_stage` is `READY` and `terrain_serial` names the
+   new terrain.
+3. Shortly after, the terrain reaches your process: `P1_EV_TERRAIN_CHANGED` with a = its serial, and
+   `P1Frame::terrain` points at it.
+
+Until step 3, `P1Frame::terrain` still points at the **previous** area's terrain. Use
+`p1_terrain_current(&f)`: it returns the frame's terrain only when its serial equals the block's
+`terrain_serial`, and null otherwise, so you never draw the old area's walls over the new area.
+A portal round trip (map, hideout, map) can re-adopt an earlier terrain without reading it again
+(`P1_RADAR_TERRAIN_REUSED`): its serial comes back and the terrain arrives again. Serials are unique
+per build but do not only grow: compare them for equality. Match a terrain on its serial, never on
+`area_hash` (a re-used terrain keeps the hash it was built with).
+
+### The terrain (`P1Terrain`)
+
+One `P1Terrain` per area, built once by the app's game reader and never changed afterwards. The
+host has validated every offset, count and size before you see it.
+
+- **Grid.** x to the right, y down, in the game's grid cells. One cell is 250/23 world units
+  (`P1Radar::world_per_cell`); one tile is 23 x 23 cells (`cells_per_tile`); the area is `tiles_x`
+  x `tiles_y` tiles. `area_id` is the WorldArea id when it was built, `build_ms` how long the app
+  took (diagnostic).
+- **Walkable grid** (the game's movement layer): `walk_width` x `walk_height` cells, packed two per
+  byte, row-major, `walk_bytes_per_row` bytes a row, **even x in the low nibble**. Value 0 =
+  blocked, 1 = walkable next to an obstacle, 2 or more = walkable interior. Read a cell with
+  `p1_terrain_cell(t, x, y)` (0..15, 0 outside the grid) or `p1_terrain_walkable(t, x, y)`.
+  `walk_bytes` 0 means the grid was left out.
+- **Heights:** one value per cell, row-major, `height_width` x `height_height` = `tiles_x*23` x
+  `tiles_y*23`. This grid can be **0..2 cells narrower** than the walkable one (walkable rows are
+  padded to whole bytes), so never index one grid with the other's width. The values are world
+  units, **negated**: higher ground is more negative, the game's own convention. `height_format`:
+  `P1_HEIGHT_NONE` (flat, no grid), `P1_HEIGHT_I16` (int16 per cell, height = value x
+  `height_scale`, exact), `P1_HEIGHT_F32` (float per cell, `height_scale` 1). The app writes int16
+  whenever that is lossless, so both give you the app's values bit for bit. Read with
+  `p1_terrain_height_at(t, x, y)`, or `p1_terrain_height(t, gx, gy)` for a float position (the cell
+  it truncates into; the app's radar uses exactly this). `P1_TERRAIN_SUBTILE_HEIGHTS` says the
+  heights carry per-cell detail; without it every tile is a flat step.
+- **TGT tiles** (the tile art): `tgt_count` records `P1TerrainTgt` {`tile_x`, `tile_y`, `key_x`,
+  `key_y`, `file`}, read with `p1_terrain_tgt_at(t, i)`. A record covers the grid box
+  `[tile*23, tile*23 + 23)` on each axis. `p1_terrain_tgt_key(t, g, buf, cap)` writes the app's own key for the
+  tile, `"<file>:x:<key_x>-y:<key_y>"`, the format the app's radar targets and quest-guide exits are
+  written in. With `P1_TERRAIN_TGT_RAW_KEYS`, some keys did not parse: such a record has `key_x` =
+  `key_y` = 0xFF and `file` holds the whole key, which `p1_terrain_tgt_key` then returns as it is.
+  Tile names are hints, not truth: a wall decoration can carry an "entrance" name.
+- **Rooms** (what the level generator placed): `room_state` is `P1_ROOMS_OK`, `P1_ROOMS_NOT_READ` or
+  `P1_ROOMS_FAILED` (`rooms_reason` says why). `room_count` records `P1TerrainRoom` {`name` (the
+  `.arm` path), `min_x`, `min_y`, `max_x`, `max_y`}, read with `p1_terrain_room_at(t, i)`. The
+  bounds are **inclusive tiles**: the grid box is `[min*23, (max+1)*23)` on each axis.
+- **Strings** live in the terrain's own pool: read them with `p1_terrain_str(t, off)`, never with
+  `p1_str_get`.
+- **Parts left out.** The terrain travels through one 64 MiB slot. The Coast (84 x 84 tiles) takes
+  about 9.4 MB and a 150 x 150-tile map about 30 MB; the slot holds about 225 x 225 tiles with
+  heights. A bigger area loses parts, in this order, each with its flag: the heights
+  (`P1_TERRAIN_HEIGHTS_OMITTED`), then the TGT records and the rooms (`P1_TERRAIN_TGT_OMITTED`,
+  `P1_TERRAIN_ROOMS_OMITTED`), then the walkable grid (`P1_TERRAIN_WALK_OMITTED`). Test the counts
+  and sizes, never assume a part is there.
+
+### Holding a terrain on your own thread
+
+`P1Frame::terrain` is valid until the callback returns (the host replaces it only between
+callbacks). To use a terrain on a thread of your own, take a reference: `p1::TerrainRef::HoldNewest()`
+(C: `terrain_hold`) returns the newest terrain with one reference taken, valid on **any** thread
+until the `TerrainRef` is reset or destroyed (C: one `terrain_release` per `terrain_hold`). It is
+empty without the permission, before the first terrain and on an app without radar data. The
+newest terrain can already be newer than the one you looked at, so compare `serial`. Every terrain
+you hold counts against your `memoryLimitMB`: drop the old reference when `P1_EV_TERRAIN_CHANGED`
+arrives. Releasing a pointer the host never gave you does nothing.
+
+```cpp
+// OnTick: analyse each area's terrain once, on a thread of your own.
+void OnTick(const P1Frame& f) override {
+    if (m_job.valid() && m_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+        m_exits = m_job.get();                                   // your own result type
+    const P1Terrain* cur = p1_terrain_current(&f);
+    if (!cur || cur->serial == m_analysed || m_job.valid()) return;
+    auto held = std::make_shared<p1::TerrainRef>(p1::TerrainRef::HoldNewest());
+    if (!*held || (*held)->serial != cur->serial) return;       // a newer one is on its way
+    m_analysed = cur->serial;
+    m_job = std::async(std::launch::async, [held] { return FindExits(*held->get()); });
+}
+```
+
+### The projection
+
+The app's radar maps a grid position onto the screen like this (`p1_radar.h`):
+
+```
+dx = g.x - player.x;  dy = g.y - player.y;  z = dz_world * height_to_grid
+screen.x = cx + scale * ((dx - dy) * cos(camera_angle))
+screen.y = cy + scale * ((z - (dx + dy)) * sin(camera_angle))
+```
+
+(`cx`, `cy`) is where the player is drawn, `scale` the pixels per grid unit, and `dz_world` the
+height to draw at minus the player's height, both negated world units, so higher ground lifts the
+point. A `P1MapTransform` holds `cx`, `cy`, `scale` and the angle; `valid` is 0 when it cannot be
+used. Get one from:
+
+| Where you draw | Transform | Notes |
+|---|---|---|
+| the game's large map (the full-screen map) | `p1::Radar::LargeMap(f)`, C `p1_radar_large_map(s, client_h)` | invalid while the map is closed |
+| the game's minimap (top right) | `p1::Radar::MiniMap(f)`, C `p1_radar_mini_map(s, client_h)` | clip to `p1::Radar::MiniMapClip(f, min, max)` (C `p1_mini_map_clip`) |
+| a square panel of your own | `p1_panel_rect(client_w, client_h, fx, fy, fsize, rect)` + `p1_panel_transform(rect, zoom, px_per_base, &k)` | the app radar's panel: side = `fsize` x `client_h` (capped to the client), top-left (`fx` x `client_w`, `fy` x `client_h`) kept inside the client; `zoom` x `px_per_base` x 2 pixels per grid unit |
+| anything else | `p1_make_transform(cx, cy, scale, &k)` | |
+
+The two map transforms are invalid while `P1_SNAP_MAP_VALID` is not set. They apply the user's
+**calibration**: the corrections set in the app's Radar tab for each game map (`large_cal_scale`,
+`large_cal_dx`, `large_cal_dy`, `mini_cal_*` in the block; neutral = scale 1, offsets 0; offsets in
+client pixels). With your own map element math, pass them to `p1_large_map_transform(m,
+px_per_base, cal_scale, cal_dx, cal_dy, &k)` / `p1_mini_map_transform`. `px_per_base` is always
+`client_h / ui_base_height`.
+
+Apply a transform with `p1::Radar::ToMap(t, me, gx, gy, height)` (C:
+`p1_grid_to_map(&t, pgx, pgy, gx, gy, dz_world, &sx, &sy)`): pass the terrain height at the point,
+and `ToMap` subtracts the player's. The inverse, at height 0, is `p1_map_to_grid(&t, pgx, pgy, sx,
+sy, &gx, &gy)`: for example the cell under the cursor.
+
+**Constants.** `p1_radar_consts(r)` returns the app's own values from the block: `camera_angle`,
+`height_to_grid`, `world_per_cell`, `map_scale_factor`, `large_center_mul_x`, `ui_base_height` and
+the two projection switches. With `r` null (an app without radar data) it returns built-in
+defaults, the same values. Read them from the block rather than hard-coding them: two of them
+(`map_scale_factor` and the large map's centre multiplier) are the app's best estimates, which is
+what the calibration corrects, and a later app may refine them.
+
+**The player.** `p1::Radar::PlayerOf(f, &motion)` returns a `p1::Radar::Player` {`gx`, `gy`,
+`height`, `valid`}: the block's `player_grid_x` / `player_grid_y` (the player as the app's radar
+centres on it, read from the full entity list, so a truncated entity array never loses it), the
+height from `p1_terrain_current` when there is one (else `player_height`), extrapolated with
+`motion` (pass `nullptr` for the raw position). `player_entity_index` is the player's row in the
+entity array, 0xFFFFFFFF = none.
+
+**Entities** carry their float grid position and the terrain height under it in `P1EntityRadar`
+(`grid_x`, `grid_y`, `height`). For a bare `P1Entity`, `p1_entity_grid(e, world_per_cell, &gx, &gy)`
+gives the same position (`render_pos` / `world_per_cell`, else the integer grid) and
+`p1_terrain_height(t, gx, gy)` the height.
+
+**Player motion.** The game reader samples the player 30 to 60 times a second, but the game
+scrolls its map every game frame. `p1::Radar::PlayerMotion` closes that gap: `PlayerOf` feeds it
+each snapshot's position and predicts the position at `f.now_us`. Its rule is the app radar's: a
+velocity from two samples 5 to 120 ms apart and at most 12 cells apart, a horizon of
+min(1.25 x the sample interval, 50 ms), a sample older than 250 ms used as it is, and a fresh start
+on an area change. The prediction only shows when you build overlay frames between snapshots:
+`p1::RequestFrames(fps)`, capped by your `maxFps`, and only while a map is on screen.
+
+### Drawing the terrain
+
+`p1::TerrainTexture` does all of it the app radar's way:
+
+- `Update(f)` on the plugin thread (`OnTick`). Cheap when nothing changed. When the current area's
+  terrain arrives, it holds it, builds the image on a background thread, and uploads it on a later
+  `OnTick`. It frees the previous texture before creating the new one (two area-sized textures may
+  not fit the budget together); when the budget is still full it tries again 2 s later, and an image
+  finished for an area you have already left is dropped.
+- `Draw(dl, f, t, me, tint)` in `OnOverlay` lays the image under the map with the corners the app
+  uses (one `AddImageQuad`). It draws only while the texture is the current area's and returns
+  `false` otherwise. The image is flat: the player's height moves it, and the per-cell relief is
+  baked into the pixels by `lift_by_height`.
+- `P1TerrainStyle` {`color` (`IM_COL32` layout), `border` (square brush radius in cells, 0..3),
+  `filled` (0 = the outline, the walls; 1 = every walkable cell), `lift_by_height` (1 = shift each
+  cell by its height, the way the game map shows it)}. The default is `{0xFFFFFFFF, 0, 0, 1}` (white walls,
+  no border, lifted): choose the colour with `Draw`'s tint. `SetStyle` rebuilds the image. `Release()` frees the texture after
+  waiting for a running build; the destructor calls it.
+
+One level down, `p1::BuildTerrainImage(t, style, image, maxBytes)` fills a `p1::TerrainImage`
+{`serial`, `width`, `height`, `cellsPerTexel`, `rgba`}, and in C `p1_terrain_image_size(t, ds, &w,
+&h)` + `p1_terrain_pixels(t, &style, ds, rgba, w, h)` paint into your own zero-filled buffer. Both
+are pure CPU: run them on any thread while you hold the terrain.
+
+- **Downscaling.** `BuildTerrainImage` tries 1, 2, 3, ... cells per texel until each side is at
+  most 4096 texels and the image at most `maxBytes` (24 MiB by default); it fails past 64. A texel
+  is painted when **any** cell it covers is painted, so thin walls survive a downscale. Texel
+  (i, j) covers cells `[i*ds, (i+1)*ds)` x `[j*ds, (j+1)*ds)`, so the image spans grid (0, 0) to
+  `(width*ds, height*ds)`. At one cell per texel the pixels are byte-identical to the
+  app radar's own texture.
+- **Texture limits** (section 7): 4096 x 4096 per texture and **64 MiB of live textures per plugin,
+  ImGui's font atlases included**. A full 4096 x 4096 image would be the whole budget, hence the
+  24 MiB default. Budget the icon atlas too (below).
+- **Upload pacing.** The app uploads at most about 2 MiB per rendered frame across all plugins, so
+  a 24 MiB terrain image takes about a dozen frames to arrive, and a frame that draws a new texture
+  is shown only after its data arrived: your previous frame stays on screen meanwhile. Build once
+  per area, never per frame.
+- Drawing the grid cell by cell (`AddRectFilled` per walkable cell) is far over the per-frame
+  vertex limit on any real area: use the texture.
+
+### Entities and icons
+
+`P1EntityRadar` element i describes entity i (`p1_entity_at(&s, i)`). `p1::Radar::Entities(s)` is
+empty when there is no block. Its fields:
+
+| Field | Meaning |
+|---|---|
+| `category` | the app radar's classification, `P1_RCAT_*` (`SELF`, `PLAYER`, `MINION`, the four monster rarities, `ROGUE_EXILE`, `NPC`, the chests and `STRONGBOX`, `SHRINE`, `AREA_TRANSITION`, `WAYPOINT`, `CHECKPOINT`, `PORTAL`, the league mechanics, `QUEST_OBJECT`, `QUEST_ITEM`, `GAME_ICON`). `P1_RCAT_NONE` (0xFF) = the app's radar does not draw it. The list only grows: treat a value you do not know as unknown |
+| `group` | `P1_RGROUP_*` of the category: `PLAYERS`, `MONSTERS`, `NPCS`, `CHESTS`, `WORLD`, `LEAGUES`, `QUEST`, or `NONE` |
+| `flags` | `P1_ERAD_HIDDEN` (the app's default filters hide it right now: an opened chest, a dead or untargetable monster), `P1_ERAD_GAME_ICON` (the app draws it with its own game minimap icon, `game_icon_cell`), `P1_ERAD_HAS_POSITION`, `P1_ERAD_LOCAL_PLAYER` |
+| `game_icon_cell` | the entity's game minimap icon in the atlas, `P1_ICON_CELL_NONE` (0xFFFF) = none |
+| `style_icon_cell` | the app's default icon for the category (not the user's own radar styles), or none |
+| `grid_x`, `grid_y`, `height` | float grid position and the terrain height under it |
+
+To read both arrays together, walk the index:
+
+```cpp
+const P1Snapshot& s = *f.snapshot;
+for (uint32_t i = 0; i < s.entity_count; ++i) {
+    const P1Entity* e = p1_entity_at(&s, i);
+    const P1EntityRadar* r = p1_entity_radar_at(&s, i);
+    if (!e || !r || r->category == P1_RCAT_NONE) continue;
+    if (r->group == P1_RGROUP_MONSTERS && e->rarity == 3) { /* a unique monster */ }
+}
+```
+
+`p1_radar_category_key(category)` returns the category's stable name (`"MonsterRare"`), the key the
+app uses in its own config: use it as the key of per-category settings in your settings file.
+
+**The icon atlas** is a PNG under the app folder: `AppDir()` + `\` + the block's `atlas_path`
+(`"Resources/radar/icons.png"`; the `/` works in Windows file APIs). It is `atlas_w` x `atlas_h`
+pixels of square `atlas_cell_px` cells, `atlas_columns` to a row; cell n sits at column
+n % `atlas_columns`, row n / `atlas_columns`. Read the sizes from the block, never hard-code them: the
+atlas changes with the app. The SDK has no image decoder: decode the PNG yourself (a PNG decoder
+compiled into your DLL, or WIC) on a thread of your own, then upload it with `p1::Texture::Create`
+on the plugin thread. The whole atlas (896 x 3392 today) is about 11.6 MiB of your 64 MiB texture
+budget, so with a terrain texture next to it consider copying only the cells you draw into a
+smaller texture.
+
+```cpp
+// The UV rectangle of an atlas cell (game_icon_cell / style_icon_cell); false = no icon.
+bool CellUv(const P1Radar& r, uint16_t cell, ImVec2& uv0, ImVec2& uv1) {
+    if (cell == P1_ICON_CELL_NONE || r.atlas_columns == 0 || r.atlas_w == 0 || r.atlas_h == 0) return false;
+    const uint32_t x = (cell % r.atlas_columns) * r.atlas_cell_px, y = (cell / r.atlas_columns) * r.atlas_cell_px;
+    if (x + r.atlas_cell_px > r.atlas_w || y + r.atlas_cell_px > r.atlas_h) return false;
+    uv0 = ImVec2(float(x) / r.atlas_w, float(y) / r.atlas_h);
+    uv1 = ImVec2(float(x + r.atlas_cell_px) / r.atlas_w, float(y + r.atlas_cell_px) / r.atlas_h);
+    return true;
+}
+// The atlas file, once the radar block is there. A UTF-8 path: widen it for the W APIs (section 8).
+if (const P1Radar* rb = p1::Radar::Get(s)) {
+    std::wstring path = p1::Widen(AppDir());
+    if (!path.empty() && path.back() != L'\\') path.push_back(L'\\');
+    path += p1::Widen(p1::Str(s, rb->atlas_path));
+    // decode it on your own thread, then p1::Texture::Create on the plugin thread
+}
+```
+
+### The quest log and the quest list
+
+- **Quest log:** `P1QuestState` {`id` (the Quest.dat id, `"a1q1"`), `state` (0 = complete, -1 = not
+  started, else the order of the state the quest is in)}, sorted by id. `p1_quest_find(&s, "a1q1",
+  &state)` finds one (0 = the log has no such quest); `p1::Radar::Quests(s)` walks them all.
+  `quest_serial` changes whenever the content changes. `P1_RADAR_QUESTS_USABLE` = the log is
+  settled and belongs to the current character (the app's own guide uses it only then);
+  `P1_RADAR_QUESTS_PROVISIONAL` = the first read for this character, not settled yet: right after
+  a character switch the game can still hold the previous character's log.
+- **Quest list** (the game's list of tracked quests on the right of the screen):
+  `P1QuestTrackerEntry` {`id`, `min_x`, `min_y`, `max_x`, `max_y`}, top to bottom. The box is in UI
+  base units: pixels = base x `client_h` / `ui_base_height`. An entry that an open game window
+  covers is left out, and the list is not read in hideouts (the game shows none there).
+  `tracker_serial` changes with the content.
+
+### Performance and budgets
+
+- **The app's side** is the radar's own reads at the radar's cadence, nothing more: the terrain is
+  built once per area (in steps, and it waits while the app trades), exported once per area and
+  copied once into your process. While the app's trade automation runs, the radar reads wait
+  (`DEFERRED` stages) and the last map state is carried.
+- **Your frame** carries at most 150,000 vertices, and the app draws at most **1024 draw commands**
+  and 6 screens of fill of it (section 7). A radar is a few hundred icons, which fits if you
+  batch: every change of texture or clip rectangle starts a new draw command, so draw in passes
+  (the terrain quad, then all shapes, then all atlas icons, then text) instead of shape, icon and
+  text per entity, and push the minimap's clip rectangle once around everything.
+- **Skip what is off the map** before you add it, and keep shapes cheap: a small `AddRectFilled` is
+  4 vertices, a circle with the default segment count many more.
+- **Frames.** By default an overlay frame is built on every new snapshot. Call
+  `p1::RequestFrames(N)` only while a map is open, and 0 again when it closes.
+- **Threads.** Build images and analyse terrains off the plugin thread (`p1::TerrainTexture` and
+  `p1::TerrainRef` above): a callback that blocks for 5 s kills the plugin.
+
+### A minimal radar
+
+`plugin.json`:
+
+```json
+{
+  "id": "mini_radar",
+  "name": "Mini radar",
+  "version": "1.0.0",
+  "dll": "MiniRadar.dll",
+  "sdk": 1,
+  "permissions": ["radar"],
+  "panel": false,
+  "memoryLimitMB": 512
+}
+```
+
+The plugin: the area's walls and a dot per entity, on the large map while it is open and on the
+minimap otherwise.
+
+```cpp
+#include <p1sdk/p1sdk.hpp>
+
+class MiniRadar final : public p1::Plugin {
+public:
+    void OnTick(const P1Frame& f) override {
+        m_terrain.Update(f);                  // a new area: builds the image off-thread, uploads it later
+    }
+
+    void OnOverlay(const P1Frame& f) override {
+        const P1Snapshot& s = *f.snapshot;
+        if (!(s.flags & P1_SNAP_IN_GAME) || !(s.flags & P1_SNAP_RADAR_VALID)) return;
+
+        ImDrawList* dl = ImGui::GetBackgroundDrawList();
+        P1MapTransform t = p1::Radar::LargeMap(f);              // the large map, while it is open
+        const bool mini = !t.valid;
+        if (mini) {                                             // else the minimap, clipped to it
+            ImVec2 clipMin, clipMax;
+            t = p1::Radar::MiniMap(f);
+            if (!t.valid || !p1::Radar::MiniMapClip(f, clipMin, clipMax)) return;
+            dl->PushClipRect(clipMin, clipMax, true);
+        }
+
+        const p1::Radar::Player me = p1::Radar::PlayerOf(f, &m_motion);
+        if (me.valid) {
+            m_terrain.Draw(dl, f, t, me, IM_COL32(150, 200, 255, 150));   // the walls: one draw command
+            const float r = 3.0f * (f.viewport.ui_scale > 0.0f ? f.viewport.ui_scale : 1.0f);
+            for (const P1EntityRadar& e : p1::Radar::Entities(s)) {       // then every dot
+                if (e.category == P1_RCAT_NONE || !(e.flags & P1_ERAD_HAS_POSITION) ||
+                    (e.flags & (P1_ERAD_HIDDEN | P1_ERAD_LOCAL_PLAYER))) continue;
+                const ImVec2 p = p1::Radar::ToMap(t, me, e.grid_x, e.grid_y, e.height);
+                dl->AddRectFilled(ImVec2(p.x - r, p.y - r), ImVec2(p.x + r, p.y + r), ColorOf(e.group));
+            }
+            dl->AddCircleFilled(ImVec2(t.cx, t.cy), r * 1.5f, IM_COL32(255, 255, 255, 255));   // you
+        }
+        if (mini) dl->PopClipRect();
+    }
+
+private:
+    static ImU32 ColorOf(uint8_t group) {
+        switch (group) {
+            case P1_RGROUP_MONSTERS: return IM_COL32(240, 80, 70, 230);
+            case P1_RGROUP_CHESTS:   return IM_COL32(240, 200, 60, 230);
+            case P1_RGROUP_WORLD:    return IM_COL32(90, 200, 255, 230);
+            case P1_RGROUP_QUEST:    return IM_COL32(120, 240, 120, 230);
+            default:                 return IM_COL32(200, 200, 200, 200);
+        }
+    }
+    p1::TerrainTexture m_terrain;             // white walls with the relief baked in, tinted in Draw
+    p1::Radar::PlayerMotion m_motion;         // keeps the centre moving between snapshots
+};
+
+P1_PLUGIN(MiniRadar, "mini_radar", "Mini radar", "1.0.0", "you", "A minimal radar on the game's maps.")
+```
+
+The SDK Example's lesson 24, "Build a radar" (`maprad`), goes further on the same foundations.
+
+## 12. Logging, toasts and the clipboard
 
 ```cpp
 p1::Log(P1_LOG_INFO, "entered %s", p1::Str(s, s.area.name));        // printf-style, UTF-8
@@ -955,7 +1441,7 @@ p1::SetClipboard("https://example.org/build/123");                 // via the ap
 None of these calls ever block. When the shared ring they travel through is full, the record is
 dropped and counted. Do not log every frame: log changes.
 
-## 12. Debugging
+## 13. Debugging
 
 ### The Plugins tab
 
@@ -968,8 +1454,10 @@ two icon buttons that name themselves in their tooltips: open the plugins folder
 A row shows the name, then the **state chip** and the installed version, or the update the catalog
 offers. The selected plugin fills the rest of the page:
 
-- a compact **header card**: the name, version, author and permission chips on one row, the
-  description on one line (all of it in the tooltip), then **Enable**, **Allow input** (only with
+- a compact **header card**: the name, version, author and permission chips on one row (Reads game
+  memory, Keyboard and mouse, Map and radar data, Draws over the game, Settings panel; each explains
+  itself in a tooltip), the description on one line (all of it in the tooltip), then **Enable**,
+  **Allow input** (only with
   the `input` permission), **Restart**, **Update to X** or **Repair** when the catalog offers one,
   and **Remove** (a plugin the catalog installed) or "Open its folder" (a plugin placed by hand).
   Below them: the **state detail**, the restart countdown, the crash count of the last 10 minutes,
@@ -1042,7 +1530,7 @@ the log). The app cannot tell a debugger from a hang: a breakpoint that holds a 
 than 5 s, or stops the whole process for more than 10 s, gets the process killed. Break briefly,
 or debug with logging.
 
-## 13. ABI and versioning rules
+## 14. ABI and versioning rules
 
 What has to match, and when:
 
@@ -1061,10 +1549,31 @@ Rules that keep a plugin working across app releases:
   your DLL and the host. The SDK wrapper keeps exceptions on your side.
 - **Structs only grow at the end.** Every ABI struct starts with `size_bytes`. A side reads a field
   only when `size_bytes` covers it: `P1_HAS_FIELD(p, Type, field)` for `P1HostApi`, `P1Frame`,
-  `P1Event` and `P1PluginInfo`, and `P1_SNAP_HAS(s, field)` for the snapshot header. The SDK
-  wrapper already checks every host function it calls. Never write `sizeof(your struct)` into
-  memory the other side owns.
+  `P1Event` and `P1PluginInfo` (`P1SDK_HOST_HAS(h, field)` is the same test for `P1HostApi`),
+  `P1_SNAP_HAS(s, field)` for the snapshot header, `P1_RADAR_HAS(r, field)` for the radar block
+  and `P1_TERRAIN_HAS(t, field)` for the terrain header. The SDK wrapper already checks every host
+  function it calls. Never write `sizeof(your struct)` into memory the other side owns.
+- **Test appended fields before you use them.** The radar data was added inside ABI v1, with no
+  change to `P1_ABI_VERSION` or `P1_SNAPSHOT_VERSION`: a plugin built with this SDK still loads on
+  an older app (as long as its manifest does not list `"radar"`) and finds none of it there.
+
+  | Appended | Present when | Already tested by |
+  |---|---|---|
+  | `P1Snapshot::radar_offset`, `radar_bytes` (header 528 -> 536 bytes) | `P1_SNAP_HAS(s, radar_bytes)` | `p1_radar_get`, `p1::Radar::*` |
+  | `P1Frame::terrain` (136 -> 144 bytes) | `P1_HAS_FIELD(&f, P1Frame, terrain)` | `p1_terrain_current` |
+  | `P1HostApi::terrain_hold`, `terrain_release` (144 -> 160 bytes) | `P1SDK_HOST_HAS(&HostApi(), terrain_hold)` | `p1::TerrainRef` |
+  | `P1_PERM_RADAR`, `P1_EV_TERRAIN_CHANGED`, `P1_SNAP_RADAR_VALID` | the app has radar data | |
 - **Index arrays by stride** (`p1::Entities`, `p1_entity_at`, ...), never as C arrays.
+- **Element sizes.** The arrays that came with the radar data are read through v1 element sizes,
+  never `sizeof`: `P1_ENTITY_RADAR_V1_BYTES` (20), `P1_QUEST_STATE_V1_BYTES` (8),
+  `P1_QUEST_TRACKER_V1_BYTES` (20), `P1_TERRAIN_TGT_V1_BYTES` (12), `P1_TERRAIN_ROOM_V1_BYTES` (12).
+  Their accessors accept any stride at least that big, so a later app can append fields to these
+  elements without breaking a plugin built today. The three original arrays cannot grow:
+  `p1_entity_at`, `p1_buff_at` and `p1_item_at` (and `p1::Entities` and the other ranges) compare
+  the stride with the `sizeof` your plugin was compiled with, so a `P1Entity` grown in a later SDK
+  would leave a plugin built with it seeing no entities at all on an app that writes the old size.
+  `P1Entity`, `P1Buff` and `P1InventoryItem` are therefore frozen, and new per-entity data comes in
+  parallel arrays such as `P1EntityRadar`.
 - **Ignore what you do not know:** unknown event types, `P1_STATE_*` values, `P1_COMP_*` bits and
   `P1_KIND_*` values. Write a `default:` in every switch.
 - **Copy what you keep.** No pointer into the snapshot, and no snapshot string, outlives the
@@ -1075,7 +1584,7 @@ Rules that keep a plugin working across app releases:
   `IMGUI_VERSION_NUM` changes, and plugins must be rebuilt. Additions that keep compatibility stay
   inside the same ABI version, as fields appended at the end.
 
-## 14. FAQ and troubleshooting
+## 15. FAQ and troubleshooting
 
 **Incompatible: "the DLL failed to load (missing dependency?)".** Windows could not load your DLL
 or one of its dependencies (error 126 = module not found). Put every dependency DLL **next to your
@@ -1117,10 +1626,45 @@ called only while the panel is visible.
 WGC mode (`P1_SNAP_WGC_MODE`, no game data).
 
 **Buffs or the map rectangles are always empty.** They are gated (section 6): buffs come only while
-AutoPot reads them, the map elements only while the radar runs.
+AutoPot reads them, the map elements only while the radar reads run (the user's radar is on, or a
+plugin with the `radar` permission runs: list `"radar"` in your manifest to turn them on yourself).
 
 **`entity_truncated` is not 0.** The snapshot slot (2 MiB) was full, and that many entities were
-left out. It happens only in extreme scenes.
+left out. It happens only in extreme scenes. While the radar block is written, each entity takes
+20 bytes more of the slot.
+
+**Why is my radar empty?** Go down the list (section 11):
+- `"radar"` is in `permissions` and the plugin was restarted after you edited `plugin.json`:
+  `p1::HasPermission(f, P1_PERM_RADAR)` is true. An app without radar data marks the plugin
+  Invalid with `unknown permission "radar"`.
+- The app is not in WGC mode (`P1Radar::gate` reads `P1_RGATE_WGC`) and the game is in an area
+  (`P1_RGATE_NOT_IN_GAME` on login, character select and loading screens).
+- The terrain is there: right after entering an area it is still being built (`terrain_stage`
+  `READING` or `COMPOSING`; `DEFERRED` while the app trades), and until it arrives
+  `p1_terrain_current(&f)` is null even though `P1Frame::terrain` still holds the previous area's.
+- A map is open: `p1::Radar::LargeMap(f)` is invalid while the large map is closed, and both map
+  transforms need `P1_SNAP_MAP_VALID` (`map_ui_stage` `P1_MAPUI_OK` or `DEFERRED`).
+- `p1::TerrainTexture::Update(f)` runs in every `OnTick`, and your texture budget has room
+  (section 7): with a full budget the upload waits.
+- Everything is drawn through the same transform and player (`p1::Radar::ToMap`), inside the
+  minimap's clip rectangle when you draw on the minimap.
+
+**Can I get the terrain without the permission?** No. The app gives the terrain section only to a
+plugin whose manifest lists `"radar"`: for any other plugin `P1Frame::terrain` stays null,
+`P1_EV_TERRAIN_CHANGED` never comes and `terrain_hold` returns null. The radar block in the
+snapshot can be visible to you while another plugin has the permission, but never count on that.
+
+**Does a radar plugin slow the game or the app?** The app then does what it does when the user's
+own radar is on: the radar's read-only memory reads at the radar's cadence (about 60 snapshots a
+second instead of 30), the terrain built once per area, exported once and copied once into your
+process. Nothing is ever written to the game, the app's trade work keeps priority (the radar
+reads wait while it runs), and your own drawing and CPU time stay inside your plugin's limits
+(sections 1 and 7).
+
+**My radar is offset from the game's map.** Use `p1::Radar::LargeMap(f)` / `MiniMap(f)` instead of
+your own map math (the large map's `pos_base` is its centre, the shifts are pixels: section 6).
+Two of the projection constants are estimates; the user corrects them with the calibration in
+the app's Radar tab, and the transforms apply it.
 
 **`submit_input` returns 0.** Check the `input` permission in `plugin.json`, the user's **Allow
 input** switch, `f.input_allowed` (game in the foreground, no trade or recovery automation, menu not
@@ -1133,10 +1677,10 @@ in use), and that the batch has at most 32 valid actions.
 
 **I cannot open a URL or start a program.** The sandbox forbids starting processes. Put a "Copy
 link" button in your panel that calls `p1::SetClipboard`: the clipboard is set only while the user
-is using your panel (section 11).
+is using your panel (section 12).
 
 **`p1::SetClipboard` did nothing.** It applies only while the user is using your panel (focused,
-input within the last second), never while the app trades, and at most once a second (section 11).
+input within the last second), never while the app trades, and at most once a second (section 12).
 Call it from your panel, in answer to the user.
 
 **My log lines are not in System Logs.** Only `WARN` and `ERROR` lines go there (and at most one

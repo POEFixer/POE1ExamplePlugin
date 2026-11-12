@@ -46,7 +46,7 @@ bool CopyButton(const char* label, const std::string& text) {
     p1::SetClipboard(text.c_str());      // the same as ImGui::SetClipboardText(text.c_str()) here
     return true;
 })p1snip" },
-{ "entities", "src/lessons/Entities.cpp", "CollectRows()", 47,
+{ "entities", "src/lessons/Entities.cpp", "CollectRows()", 48,
 R"p1snip(// The rows the table shows. p1::Entities walks the array by its STRIDE (a
 // newer app may grow P1Entity). Only plain numbers are kept: the snapshot, and
 // every pointer into it, is gone when the callback returns.
@@ -65,7 +65,7 @@ std::vector<Row> CollectRows(const P1Snapshot& s, const Filter& flt) {
     }
     return rows;
 })p1snip" },
-{ "events", "src/lessons/Events.cpp", "DescribeEvent()", 48,
+{ "events", "src/lessons/Events.cpp", "DescribeEvent()", 49,
 R"p1snip(// One line per event. The switch has a default: a newer app may send types
 // this plugin does not know, and those must be ignored, never treated as errors.
 std::string DescribeEvent(const P1Event& e) {
@@ -81,6 +81,7 @@ std::string DescribeEvent(const P1Event& e) {
         case P1_EV_LANGUAGE:          return "the app's language changed";
         case P1_EV_GAME_FOCUS:        return e.a ? "the game came to the front" : "the game lost the front";
         case P1_EV_INPUT_GATE:        return e.a ? "input requests accepted" : "input requests refused";
+        case P1_EV_TERRAIN_CHANGED:   return Fmt("a new area terrain, serial %lld", static_cast<long long>(e.a));
         default:                      return Fmt("unknown type %u (a newer app): ignored", e.type);
     }
 })p1snip" },
@@ -197,14 +198,50 @@ void SendLine(int level) {
 void SendToast(int level) {
     p1::Notify(level, "Toast demo", "One toast per 2 s per plugin; the app drops the rest.");
 })p1snip" },
-{ "mapui", "src/lessons/MapUi.cpp", "ToClientRect()", 26,
-R"p1snip(// A map element's rectangle in game CLIENT pixels (the overlay's coordinates).
-// UI base units are 2560 x 1600 fitted to the window height, so both axes
-// scale by client_h / 1600.
-ImVec4 ToClientRect(const P1MapElement& m, float clientH) {
+{ "maprad", "src/lessons/MapRadar.cpp", "DrawRadar()", 126,
+R"p1snip(// One radar frame on transform t (p1::Radar::LargeMap / MiniMap, or a panel's).
+// The walls first, as ONE textured quad under everything; then each entity the
+// app's radar would draw, as a small shape: same texture and clip, so they all
+// batch into one draw call. Exits get their target area's id. The player last,
+// at the map centre. me = the player as the app's radar centres on it.
+int DrawRadar(ImDrawList* under, ImDrawList* over, const P1Frame& f, const P1MapTransform& t,
+              const p1::Radar::Player& me, const p1::TerrainTexture& walls, const RadarOptions& o,
+              float scale) {
+    walls.Draw(under, f, t, me, ImGui::ColorConvertFloat4ToU32(o.color));
+    const P1Snapshot& s = *f.snapshot;
+    int drawn = 0;
+    uint32_t i = 0;
+    for (const P1EntityRadar& r : p1::Radar::Entities(s)) {   // parallel to p1::Entities(s)
+        const P1Entity* e = p1_entity_at(&s, i++);
+        if (!e || r.category == P1_RCAT_NONE) continue;         // the app's radar skips it
+        if (r.flags & (P1_ERAD_HIDDEN | P1_ERAD_LOCAL_PLAYER)) continue;   // opened, dead; the player
+        if (!GroupShown(o, r.group)) continue;
+        const ImVec2 p = p1::Radar::ToMap(t, me, r.grid_x, r.grid_y, r.height);
+        DrawShape(over, p, r, scale);
+        const char* target = p1::Str(s, e->transition_target);
+        if (r.category == P1_RCAT_AREA_TRANSITION && target[0])
+            OutlinedText(over, ImVec2(p.x + 7.0f * scale, p.y - 7.0f * scale), IM_COL32(205, 228, 255, 255), target);
+        ++drawn;
+    }
+    const ImVec2 c(t.cx, t.cy);                                  // ToMap of the player itself
+    over->AddCircleFilled(c, 5.0f * scale, IM_COL32(0, 0, 0, 220), 12);
+    over->AddCircleFilled(c, 3.5f * scale, IM_COL32(255, 255, 255, 255), 12);
+    return drawn;
+})p1snip" },
+{ "mapui", "src/lessons/MapUi.cpp", "MiniMapClientRect()", 29,
+R"p1snip(// The minimap is a real rectangle: pos is its top-left and size its size, in
+// UI base units (2560 x 1600 fitted to the window height: both axes scale by
+// client_h / 1600). The large map is NOT: its pos is the map's CENTRE and its
+// size reads 0 x 0. Its transform (p1_radar.h) adds the shift, the zoom and the
+// user's calibration: the player is drawn at (t.cx, t.cy), and t.scale is the
+// pixels per grid cell before the camera's cos / sin.
+ImVec4 MiniMapClientRect(const P1MapElement& m, float clientH) {
     const float k = clientH / 1600.0f;
     return ImVec4(m.pos_base_x * k, m.pos_base_y * k, (m.pos_base_x + m.size_base_x) * k,
                   (m.pos_base_y + m.size_base_y) * k);   // x0, y0, x1, y1
+}
+P1MapTransform LargeMapAt(const P1Snapshot& s, float clientH) {
+    return p1_radar_large_map(&s, clientH);   // .valid is 0 while the map is closed
 })p1snip" },
 { "memory", "src/lessons/Memory.cpp", "CheckPeHeader()", 44,
 R"p1snip(// A read that survives every game patch: the PE headers at the module base.

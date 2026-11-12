@@ -37,6 +37,9 @@
 #  undef P1SDK_UNDEF_NOMINMAX
 #endif
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdarg>
 #include <cstdint>
@@ -44,7 +47,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <future>
 #include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <type_traits>
@@ -406,6 +411,314 @@ inline void Destroy(ImTextureID tex) noexcept {
 }
 
 } // namespace Texture
+
+// ---------------------------------------------------------------------------
+// Radar — everything for a radar of your own (p1_radar.h, p1_terrain.h).
+// Needs the "radar" permission in plugin.json (P1_PERM_RADAR): then the app runs
+// its radar reads while your plugin runs and maps each area's terrain into your
+// process. Typical use:
+//
+//   OnTick:    m_terrain.Update(f);              // builds the image off-thread, uploads it
+//   OnOverlay: const P1MapTransform t = p1::Radar::LargeMap(f);   // or MiniMap(f) + its clip
+//              if (!t.valid) return;
+//              const p1::Radar::Player me = p1::Radar::PlayerOf(f, &m_motion);
+//              m_terrain.Draw(ImGui::GetBackgroundDrawList(), f, t, me);
+//              for (const P1EntityRadar& r : p1::Radar::Entities(*f.snapshot)) {
+//                  if (r.category == P1_RCAT_NONE || (r.flags & P1_ERAD_HIDDEN)) continue;
+//                  const ImVec2 p = p1::Radar::ToMap(t, me, r.grid_x, r.grid_y, r.height);
+//                  ...
+//              }
+// ---------------------------------------------------------------------------
+namespace Radar {
+
+inline const P1Radar* Get(const P1Snapshot& s) noexcept { return p1_radar_get(&s); }
+
+using EntityRadarRange = StridedRange<P1EntityRadar, &p1_entity_radar_at>;
+using QuestRange       = StridedRange<P1QuestState, &p1_quest_at>;
+using TrackerRange     = StridedRange<P1QuestTrackerEntry, &p1_tracker_at>;
+
+// Parallel to p1::Entities(s): element i describes entity i. Empty without the radar block.
+inline EntityRadarRange Entities(const P1Snapshot& s) noexcept {
+    const P1Radar* r = p1_radar_get(&s);
+    const bool ok = r && r->entity_stride >= P1_ENTITY_RADAR_V1_BYTES && r->entity_count == s.entity_count;
+    return EntityRadarRange(&s, 0, ok ? r->entity_count : 0u);
+}
+inline QuestRange Quests(const P1Snapshot& s) noexcept {
+    const P1Radar* r = p1_radar_get(&s);
+    return QuestRange(&s, 0, (r && r->quest_stride >= P1_QUEST_STATE_V1_BYTES) ? r->quest_count : 0u);
+}
+inline TrackerRange Tracker(const P1Snapshot& s) noexcept {
+    const P1Radar* r = p1_radar_get(&s);
+    return TrackerRange(&s, 0, (r && r->tracker_stride >= P1_QUEST_TRACKER_V1_BYTES) ? r->tracker_count : 0u);
+}
+
+// The transforms the app's radar would use this frame (the user's calibration included).
+inline P1MapTransform LargeMap(const P1Frame& f) noexcept {
+    return p1_radar_large_map(f.snapshot, float(f.viewport.client_h));
+}
+inline P1MapTransform MiniMap(const P1Frame& f) noexcept {
+    return p1_radar_mini_map(f.snapshot, float(f.viewport.client_h));
+}
+// The minimap's rectangle in client px (push it as a clip rect: ImDrawList::PushClipRect).
+inline bool MiniMapClip(const P1Frame& f, ImVec2& mn, ImVec2& mx) noexcept {
+    if (!f.snapshot || !(f.snapshot->flags & P1_SNAP_MAP_VALID) || f.viewport.client_h <= 0) return false;
+    const P1RadarConsts k = p1_radar_consts(p1_radar_get(f.snapshot));
+    float r[4];
+    p1_mini_map_clip(&f.snapshot->mini_map, float(f.viewport.client_h) / k.ui_base_height, r);
+    mn = ImVec2(r[0], r[1]);
+    mx = ImVec2(r[2], r[3]);
+    return true;
+}
+
+// Player motion: the worker samples the player 30-60 times a second, the game scrolls its map
+// every game frame. Feeding each snapshot's position here and predicting at P1Frame::now_us
+// moves your radar every overlay frame (the app radar's own rule: velocity from two samples
+// 5..120 ms apart and at most 12 cells apart, horizon min(1.25 x interval, 50 ms), a sample
+// older than 250 ms is used as it is).
+class PlayerMotion {
+public:
+    void Update(int64_t captureUs, float gx, float gy, uint32_t areaCounter) noexcept {
+        if (captureUs <= 0 || !std::isfinite(gx) || !std::isfinite(gy)) { *this = PlayerMotion{}; return; }
+        if (m_valid && captureUs == m_t && m_area == areaCounter) return;
+        PlayerMotion n;
+        n.m_t = captureUs; n.m_px = gx; n.m_py = gy; n.m_area = areaCounter; n.m_valid = true;
+        if (m_valid && m_area == areaCounter) {
+            const int64_t dt = captureUs - m_t;
+            const float dx = gx - m_px, dy = gy - m_py;
+            if (dt >= 5'000 && dt <= 120'000 && dx * dx + dy * dy <= 12.0f * 12.0f) {
+                const float inv = 1.0f / float(dt);
+                n.m_vx = dx * inv; n.m_vy = dy * inv; n.m_dt = dt;
+            }
+        }
+        *this = n;
+    }
+    void Predict(int64_t nowUs, float& gx, float& gy) const noexcept {
+        gx = m_px; gy = m_py;
+        if (!m_valid || m_dt <= 0) return;
+        const int64_t age = nowUs - m_t;
+        if (age <= 0 || age > 250'000) return;
+        const int64_t horizon = (std::min)(m_dt + m_dt / 4, int64_t(50'000));
+        const float t = float((std::min)(age, horizon));
+        gx = m_px + m_vx * t; gy = m_py + m_vy * t;
+    }
+private:
+    int64_t m_t = 0, m_dt = 0;
+    float m_px = 0.0f, m_py = 0.0f, m_vx = 0.0f, m_vy = 0.0f;
+    uint32_t m_area = 0;
+    bool m_valid = false;
+};
+
+// Where to centre the radar: the player's float grid position and the terrain height there.
+struct Player { float gx = 0.0f, gy = 0.0f, height = 0.0f; bool valid = false; };
+
+// The player as the app's radar centres on it, extrapolated with `motion` (nullptr = the raw
+// snapshot position). The height is read from the current terrain when there is one.
+inline Player PlayerOf(const P1Frame& f, PlayerMotion* motion) noexcept {
+    Player p;
+    const P1Snapshot* s = f.snapshot;
+    const P1Radar* r = s ? p1_radar_get(s) : nullptr;
+    if (!s || !r) return p;
+    float gx = r->player_grid_x, gy = r->player_grid_y;
+    if (motion) {
+        motion->Update(s->capture_us, gx, gy, s->area.change_counter);
+        if (s->capture_us > 0) motion->Predict(f.now_us, gx, gy);
+    }
+    p.gx = gx; p.gy = gy; p.valid = std::isfinite(gx) && std::isfinite(gy);
+    const P1Terrain* t = p1_terrain_current(&f);
+    // The terrain's own grid when it has one; else the app's value (an area too large to carry its
+    // heights still has them app-side, and every P1EntityRadar.height comes from there).
+    p.height = (t && t->height_format != P1_HEIGHT_NONE) ? p1_terrain_height(t, gx, gy) : r->player_height;
+    return p;
+}
+
+// A grid position (with the terrain height at it) -> client px on transform t.
+inline ImVec2 ToMap(const P1MapTransform& t, const Player& me, float gx, float gy, float height) noexcept {
+    float x = 0.0f, y = 0.0f;
+    p1_grid_to_map(&t, me.gx, me.gy, gx, gy, height - me.height, &x, &y);
+    return ImVec2(x, y);
+}
+
+} // namespace Radar
+
+// ---------------------------------------------------------------------------
+// Terrain (P1_PERM_RADAR) — keeping one alive, turning it into an image, drawing it.
+// ---------------------------------------------------------------------------
+// One reference on the newest terrain (P1HostApi::terrain_hold / terrain_release). Movable; any
+// thread. Empty without the permission, before the first terrain or on an older app.
+class TerrainRef {
+public:
+    TerrainRef() noexcept = default;
+    static TerrainRef HoldNewest() noexcept {
+        TerrainRef r;
+        const P1HostApi* h = Host();
+        if (h && P1SDK_HOST_HAS(h, terrain_hold) && P1SDK_HOST_HAS(h, terrain_release) && h->terrain_hold)
+            r.m_t = h->terrain_hold(h->host);
+        return r;
+    }
+    TerrainRef(TerrainRef&& o) noexcept : m_t(o.m_t) { o.m_t = nullptr; }
+    TerrainRef& operator=(TerrainRef&& o) noexcept {
+        if (this != &o) { Reset(); m_t = o.m_t; o.m_t = nullptr; }
+        return *this;
+    }
+    TerrainRef(const TerrainRef&) = delete;
+    TerrainRef& operator=(const TerrainRef&) = delete;
+    ~TerrainRef() { Reset(); }
+    void Reset() noexcept {
+        if (!m_t) return;
+        const P1HostApi* h = Host();
+        if (h && P1SDK_HOST_HAS(h, terrain_release) && h->terrain_release) h->terrain_release(h->host, m_t);
+        m_t = nullptr;
+    }
+    const P1Terrain* get() const noexcept { return m_t; }
+    const P1Terrain* operator->() const noexcept { return m_t; }
+    explicit operator bool() const noexcept { return m_t != nullptr; }
+private:
+    const P1Terrain* m_t = nullptr;
+};
+
+// The terrain as an RGBA image (p1_terrain_pixels), downscaled until it fits a texture: each side
+// <= 4096 texels and w*h*4 <= maxBytes. Pure CPU: build it on a worker thread for a big area.
+struct TerrainImage {
+    uint64_t serial = 0;           // the terrain it was built from
+    int width = 0, height = 0;     // texels
+    int cellsPerTexel = 1;         // texel (i, j) covers cells [i*n, (i+1)*n) x [j*n, (j+1)*n)
+    bool lifted = false;           // the pixels were shifted by height (lift_by_height + a height grid)
+    std::vector<uint8_t> rgba;
+    bool empty() const noexcept { return rgba.empty(); }
+};
+inline bool BuildTerrainImage(const P1Terrain& t, const P1TerrainStyle& style, TerrainImage& out,
+                              uint64_t maxBytes = 24ull << 20) noexcept {
+    try {
+        out = TerrainImage{};
+        if (t.walk_bytes == 0 || t.walk_width == 0 || t.walk_height == 0) return false;
+        int ds = 1, w = 0, h = 0;
+        for (;; ++ds) {
+            p1_terrain_image_size(&t, ds, &w, &h);
+            if (w <= 4096 && h <= 4096 && uint64_t(w) * uint64_t(h) * 4 <= maxBytes) break;
+            if (ds >= 64) return false;
+        }
+        out.rgba.assign(size_t(w) * size_t(h) * 4, 0);
+        if (!p1_terrain_pixels(&t, &style, ds, out.rgba.data(), w, h)) { out = TerrainImage{}; return false; }
+        out.serial = t.serial;
+        out.width = w;
+        out.height = h;
+        out.cellsPerTexel = ds;
+        out.lifted = style.lift_by_height && t.height_format != P1_HEIGHT_NONE && t.height_width > 0 && t.height_height > 0;
+        return true;
+    } catch (...) {
+        out = TerrainImage{};
+        return false;
+    }
+}
+
+// The current area's terrain as a texture, the app radar's way. Update() on the plugin thread
+// (OnTick) builds the image on a background thread when the area's terrain changes and uploads it
+// when it is ready; Draw() lays it under the map with the corners the app uses (the image is flat:
+// the player's own height moves it, the per-cell relief is baked into the pixels by
+// lift_by_height). The default style is white: choose the colour with Draw's tint.
+class TerrainTexture {
+public:
+    explicit TerrainTexture(P1TerrainStyle style = P1TerrainStyle{ 0xFFFFFFFFu, 0, 0, 1 },
+                            uint64_t maxBytes = 24ull << 20) noexcept : m_style(style), m_maxBytes(maxBytes) {}
+    ~TerrainTexture() { Release(); }
+    TerrainTexture(const TerrainTexture&) = delete;
+    TerrainTexture& operator=(const TerrainTexture&) = delete;
+
+    // A new style rebuilds the image for the current terrain.
+    void SetStyle(const P1TerrainStyle& s) noexcept {
+        if (std::memcmp(&s, &m_style, sizeof s) == 0) return;
+        m_style = s;
+        m_builtSerial = 0;
+    }
+    // Plugin thread (OnTick). Cheap when nothing changed.
+    void Update(const P1Frame& f) noexcept {
+        try {
+            if (m_job.valid() && m_job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                TerrainImage img = m_job.get();
+                // Only an image of the terrain that is current NOW: a finished build for an area
+                // already left must not replace (or destroy) the texture of the one we are in.
+                const P1Terrain* now = p1_terrain_current(&f);
+                if (!now || now->serial != img.serial) {
+                    m_builtSerial = 0;   // stale: the launch below builds whatever is current
+                } else if (img.empty()) {
+                    // This terrain has nothing to draw (no walkable grid): keep m_builtSerial, so it is
+                    // not rebuilt every tick; the old texture (another area's) is never drawn anyway.
+                } else {
+                    // Free the old texture FIRST: two area-sized textures at once can exceed the
+                    // 64 MiB texture budget (the font atlases count too), and then neither fits.
+                    DestroyTexture();
+                    const ImTextureID tex = Texture::Create(img.rgba.data(), img.width, img.height);
+                    if (tex) {
+                        m_tex = tex; m_texW = img.width; m_texH = img.height; m_ds = img.cellsPerTexel;
+                        m_texSerial = img.serial;
+                        m_lifted = img.lifted;
+                    } else {
+                        m_builtSerial = 0;                    // try again, but not every tick:
+                        m_retryAtUs = f.now_us + 2'000'000;   // the budget is full (your other textures)
+                    }
+                }
+            }
+            const P1Terrain* cur = p1_terrain_current(&f);
+            if (!cur || m_job.valid() || cur->serial == m_builtSerial || f.now_us < m_retryAtUs) return;
+            TerrainRef ref = TerrainRef::HoldNewest();
+            if (!ref || ref->serial != cur->serial) return;   // a newer one is on its way
+            m_builtSerial = cur->serial;
+            const P1TerrainStyle style = m_style;
+            const uint64_t maxBytes = m_maxBytes;
+            auto held = std::make_shared<TerrainRef>(std::move(ref));
+            m_job = std::async(std::launch::async, [held, style, maxBytes] {
+                TerrainImage img;
+                if (!BuildTerrainImage(*held->get(), style, img, maxBytes))
+                    img.serial = held->get()->serial;   // nothing to draw for THIS terrain (no walkable grid)
+                return img;
+            });
+        } catch (...) {
+            m_builtSerial = 0;   // a failed launch retries after a pause
+            m_retryAtUs = f.now_us + 2'000'000;
+        }
+    }
+    // Overlay (OnOverlay). Draws only while the texture is the CURRENT area's; false = nothing drawn.
+    bool Draw(ImDrawList* dl, const P1Frame& f, const P1MapTransform& t, const Radar::Player& me,
+              ImU32 tint = IM_COL32(255, 255, 255, 160)) const noexcept {
+        if (!dl || !Ready(f) || !t.valid || !me.valid) return false;
+        const float W = float(m_texW * m_ds), H = float(m_texH * m_ds);
+        // A lifted image is flat at height 0 (the relief is in its pixels), so the player's own height
+        // moves it; an unlifted one has no relief at all and lies at the player's height (dz 0).
+        const float dz = m_lifted ? -me.height : 0.0f;
+        auto P = [&](float x, float y) {
+            float sx = 0.0f, sy = 0.0f;
+            p1_grid_to_map(&t, me.gx, me.gy, x, y, dz, &sx, &sy);
+            return ImVec2(sx, sy);
+        };
+        dl->AddImageQuad(m_tex, P(0, 0), P(W, 0), P(W, H), P(0, H),
+                         ImVec2(0, 0), ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1), tint);
+        return true;
+    }
+    bool Ready(const P1Frame& f) const noexcept {
+        const P1Terrain* cur = p1_terrain_current(&f);
+        return m_tex && cur && cur->serial == m_texSerial;
+    }
+    int CellsPerTexel() const noexcept { return m_ds; }
+    // Frees the texture (plugin thread) after waiting for a running build.
+    void Release() noexcept {
+        DestroyTexture();
+        m_builtSerial = 0;
+        if (m_job.valid()) { try { m_job.wait(); (void)m_job.get(); } catch (...) {} }
+    }
+private:
+    void DestroyTexture() noexcept {
+        if (m_tex) Texture::Destroy(m_tex);
+        m_tex = 0; m_texW = m_texH = 0; m_texSerial = 0;
+    }
+    P1TerrainStyle m_style;
+    uint64_t m_maxBytes;
+    std::future<TerrainImage> m_job;
+    uint64_t m_builtSerial = 0, m_texSerial = 0;
+    int64_t m_retryAtUs = 0;          // after a failed texture_create: no rebuild before this
+    ImTextureID m_tex = 0;
+    int m_texW = 0, m_texH = 0, m_ds = 1;
+    bool m_lifted = true;
+};
 
 // ---------------------------------------------------------------------------
 // UTF-8 <-> UTF-16. Every path the host gives you is UTF-8; convert it before

@@ -17,7 +17,8 @@ constexpr LessonInfo kInfo{
             "Test the flags first: they say which parts are filled.",
     .limits = "Append-only: a field added later exists only when P1_SNAP_HAS(s, field); element structs only "
               "grow, so walk arrays by stride (p1::Entities), never as C arrays. Gated parts (buffs: AutoPot, "
-              "map rectangles: radar) are filled only while that app feature runs. At most 256 buffs, 128 "
+              "map rectangles and the radar block: radar) are filled only while that app feature runs (the radar "
+              "also while a plugin with the \"radar\" permission runs, as this one). At most 256 buffs, 128 "
               "items; a full 2 MiB slot drops entities and counts them in entity_truncated.",
     .snippet = "snapshot",
 };
@@ -82,7 +83,7 @@ private:
             { "the game reader", { P1_SNAP_ATTACHED, P1_SNAP_ATTACHING, P1_SNAP_IN_GAME, P1_SNAP_LOADING,
                                    P1_SNAP_INPUT_FOCUSED, P1_SNAP_CAMERA_VALID, P1_SNAP_INVENTORY_VALID,
                                    P1_SNAP_WORKER_FAULT } },
-            { "radar gate", { P1_SNAP_MAP_VALID } },
+            { "radar gate", { P1_SNAP_MAP_VALID, P1_SNAP_RADAR_VALID } },
             { "AutoPot gate", { P1_SNAP_BUFFS_VALID } },
             { "app state", { P1_SNAP_WGC_MODE, P1_SNAP_TRADE_BUSY, P1_SNAP_RECOVERING } },
         };
@@ -97,7 +98,7 @@ private:
                     if (n.bit == bit) b = &n;
                 if (!b) continue;
                 const bool on = (s.flags & bit) != 0;
-                const bool gated = bit == P1_SNAP_BUFFS_VALID || bit == P1_SNAP_MAP_VALID;
+                const bool gated = bit == P1_SNAP_BUFFS_VALID || bit == P1_SNAP_MAP_VALID || bit == P1_SNAP_RADAR_VALID;
                 const ui::Tone tone = on ? ui::Tone::Ok : (gated ? ui::Tone::Info : ui::Tone::Neutral);
                 const std::string text = Fmt("%s %s", on ? ICON_FA_CHECK : ICON_FA_MINUS, b->name);
                 flow.Next(ui::ChipWidth(text.c_str()));

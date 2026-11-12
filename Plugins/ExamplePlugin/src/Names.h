@@ -30,7 +30,7 @@ struct BitName {
 std::span<const BitName> SnapshotFlagNames();  // P1_SNAP_*
 std::span<const BitName> ComponentNames();     // P1_COMP_*
 
-// "memory + input", "memory", "none".
+// "memory + input + radar", "memory", "none".
 std::string PermissionsText(uint32_t perms);
 // "F7", "A", "Left mouse", ... ; "VK 0x%02X" for keys without a short name.
 std::string VkName(int vk);

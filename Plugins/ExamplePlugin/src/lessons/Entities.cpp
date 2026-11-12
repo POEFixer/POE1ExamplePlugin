@@ -23,7 +23,8 @@ constexpr LessonInfo kInfo{
             "address AND id together (the game reuses addresses).",
     .limits = "Up to the 2 MiB snapshot slot: in extreme scenes entities are left out and counted in "
               "entity_truncated. Vitals are authoritative only for the local player. targetable, "
-              "minimap_icon, transition_target and item_path are filled only while the app's radar runs.",
+              "minimap_icon, transition_target and item_path are filled only while the radar reads run (the app's "
+              "radar, or a plugin with the \"radar\" permission, as this one).",
     .snippet = "entities",
 };
 

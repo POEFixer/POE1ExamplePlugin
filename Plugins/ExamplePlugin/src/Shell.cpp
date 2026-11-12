@@ -133,7 +133,8 @@ void Nav(App& app, float width, bool compact) {
     ImGui::BeginChild("##nav", ImVec2(width, 0.0f), ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
     const ImGuiStyle& st = ImGui::GetStyle();
     // A tight list: rows a sixth of an em apart, so 23 lessons and 5 group headers fit a 720 px
-    // panel whole. The highlight of a Selectable still covers the gap, so rows read as one list.
+    // panel whole (the 24th scrolls into view when it is the open one). The highlight of a
+    // Selectable still covers the gap, so rows read as one list.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(st.ItemSpacing.x, (std::max)(2.0f, std::floor(ui::Em(0.17f)))));
     // Rows are clipped to the padded area: a scrolled row never shows half of itself in the
     // padding along the top or bottom border.
@@ -181,7 +182,8 @@ void Nav(App& app, float width, bool compact) {
     // that keeps the open lesson whole and does not scroll past the end of the list.
     if (app.shell.scrollNavToSelected && selTop >= 0.0f) {
         const float padY = st.WindowPadding.y, viewTop = ImGui::GetScrollY(), viewH = ImGui::GetWindowHeight();
-        if (selTop < viewTop || selBottom > viewTop + viewH) {
+        // "Whole" inside the padded area: the clip above hides what reaches into the padding.
+        if (selTop < viewTop + padY || selBottom > viewTop + viewH - padY) {
             const float listEnd = ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y;   // the last row's bottom
             const float maxScroll = (std::max)(0.0f, listEnd + padY - viewH);
             const float lower = selBottom + padY - viewH, upper = (std::min)(selTop - padY, maxScroll);

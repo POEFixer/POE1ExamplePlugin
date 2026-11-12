@@ -99,9 +99,9 @@ struct EventRecord {
     int64_t a = 0, b = 0;
 };
 inline constexpr size_t kEventLogSize = 50;
-// One counter per known P1_EV_* type (1 .. P1_EV_INPUT_GATE); slot 0 counts every other type,
+// One counter per known P1_EV_* type (1 .. P1_EV_TERRAIN_CHANGED); slot 0 counts every other type,
 // so a type a newer app adds shows up as "unknown" instead of hiding in a slot of its own.
-inline constexpr uint32_t kEventSlots = P1_EV_INPUT_GATE + 1u;
+inline constexpr uint32_t kEventSlots = P1_EV_TERRAIN_CHANGED + 1u;
 inline constexpr uint32_t EventSlot(uint32_t type) { return type >= 1u && type < kEventSlots ? type : 0u; }
 
 struct AreaVisit {

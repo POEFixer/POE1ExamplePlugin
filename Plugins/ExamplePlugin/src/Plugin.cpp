@@ -217,5 +217,5 @@ private:
 }  // namespace
 }  // namespace ex
 
-P1_PLUGIN(ex::ExamplePlugin, "example", "SDK Example", "2.0.0", "POE1Fixer",
-          "A guided tour of the plugin SDK: 23 lessons with live data, limits and copyable snippets.")
+P1_PLUGIN(ex::ExamplePlugin, "example", "SDK Example", "2.1.0", "POE1Fixer",
+          "A guided tour of the plugin SDK: 24 lessons with live data, limits and copyable snippets.")

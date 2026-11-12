@@ -108,6 +108,7 @@
     <ClCompile Include="src\lessons\Memory.cpp" />
     <ClCompile Include="src\lessons\Performance.cpp" />
     <ClCompile Include="src\lessons\Threads.cpp" />
+    <ClCompile Include="src\lessons\MapRadar.cpp" />
     <!-- The SDK's pinned ImGui core: warnings off (vendored, does not pass /W4 clean). -->
     <ClCompile Include="..\..\PluginSDK\imgui\imgui.cpp">
       <WarningLevel>TurnOffAllWarnings</WarningLevel>

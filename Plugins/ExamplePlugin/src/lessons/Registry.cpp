@@ -1,7 +1,7 @@
 // The lesson list, in menu order. The ids are fixed (settings.json and the screenshot tool use
 // them): lifecycle, events, logging, settings, language, snapshot, player, area, entities, buffs,
 // inventory, mapui, overlay, w2s, textures, widgets, style, keyboard, input, clipboard, memory,
-// performance, threads.
+// performance, threads, maprad.
 #include "lessons/Lesson.h"
 
 namespace ex {
@@ -19,7 +19,7 @@ const char* GroupName(Group g) {
 
 std::vector<std::unique_ptr<Lesson>> MakeAllLessons() {
     std::vector<std::unique_ptr<Lesson>> v;
-    v.reserve(23);
+    v.reserve(24);
     // Basics
     v.push_back(MakeLifecycleLesson());
     v.push_back(MakeEventsLesson());
@@ -48,6 +48,7 @@ std::vector<std::unique_ptr<Lesson>> MakeAllLessons() {
     v.push_back(MakeMemoryLesson());
     v.push_back(MakePerformanceLesson());
     v.push_back(MakeThreadsLesson());
+    v.push_back(MakeMapRadarLesson());
     return v;
 }
 

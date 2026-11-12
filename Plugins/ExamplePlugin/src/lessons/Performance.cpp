@@ -26,7 +26,7 @@ constexpr LessonInfo kInfo{
     .limits = "Per overlay frame 150,000 vertices, 300,000 indices, 8,192 commands; the app draws at most 1,024 "
               "commands and 6 screens of fill. Textures 1,024 / 64 MiB. Overlay at most maxFps, panel at most 60 "
               "fps while shown. 30 ms a second of the app's service thread. CPU: 25 % of the machine, on a "
-              "quarter of the logical processors. Memory: memoryLimitMB from plugin.json (256 here).",
+              "quarter of the logical processors. Memory: memoryLimitMB from plugin.json (512 here).",
     .snippet = "performance",
 };
 
@@ -212,7 +212,7 @@ private:
                              m_proc.systemCpus, m_proc.cpuRatePercent ? Fmt("%u %%", m_proc.cpuRatePercent).c_str() : "unreadable")
                        : std::string("sampling..."),
             m_sampleUs && capCpus > 0.0 ? share(m_proc.cpuPercent / 100.0, capCpus) : -1.0f);
-        row("Memory", "memoryLimitMB in plugin.json (256 here); over it allocations fail",
+        row("Memory", "memoryLimitMB in plugin.json (512 here); over it allocations fail",
             m_sampleUs ? Fmt("working set %s, private %s; Job cap %s", FormatBytes(m_proc.workingSet).c_str(),
                              FormatBytes(m_proc.privateBytes).c_str(),
                              m_proc.memoryLimit ? FormatBytes(m_proc.memoryLimit).c_str() : "unreadable")
