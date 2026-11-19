@@ -228,20 +228,26 @@ int DrawRadar(ImDrawList* under, ImDrawList* over, const P1Frame& f, const P1Map
     over->AddCircleFilled(c, 3.5f * scale, IM_COL32(255, 255, 255, 255), 12);
     return drawn;
 })p1snip" },
-{ "mapui", "src/lessons/MapUi.cpp", "MiniMapClientRect()", 29,
-R"p1snip(// The minimap is a real rectangle: pos is its top-left and size its size, in
-// UI base units (2560 x 1600 fitted to the window height: both axes scale by
-// client_h / 1600). The large map is NOT: its pos is the map's CENTRE and its
-// size reads 0 x 0. Its transform (p1_radar.h) adds the shift, the zoom and the
-// user's calibration: the player is drawn at (t.cx, t.cy), and t.scale is the
-// pixels per grid cell before the camera's cos / sin.
-ImVec4 MiniMapClientRect(const P1MapElement& m, float clientH) {
-    const float k = clientH / 1600.0f;
-    return ImVec4(m.pos_base_x * k, m.pos_base_y * k, (m.pos_base_x + m.size_base_x) * k,
-                  (m.pos_base_y + m.size_base_y) * k);   // x0, y0, x1, y1
+{ "mapui", "src/lessons/MapUi.cpp", "MiniMapClientRect()", 33,
+R"p1snip(// UI base units (2560 x 1600) are fitted to the height of the game's UI area:
+// the whole client, unless the window is wider (or taller) than the game allows
+// and it draws black bars around a centred area (p1_ui_area, POE1Fixer 50).
+// The minimap is a real rectangle: pos is its top-left and size its size. The
+// large map is NOT: its pos is the map's CENTRE and its size reads 0 x 0. Its
+// transform (p1_radar.h) adds the area, the shift, the zoom and the user's
+// calibration: the player is drawn at (t.cx, t.cy), and t.scale is the pixels
+// per grid cell before the camera's cos / sin.
+ImVec4 MiniMapClientRect(const P1Snapshot& s, float clientW, float clientH) {
+    P1UiArea a;
+    p1_ui_area(&s, clientW, clientH, &a);   // the whole client with an older app
+    const float k = (a.bottom - a.top) / 1600.0f;
+    const P1MapElement& m = s.mini_map;
+    return ImVec4(a.left + m.pos_base_x * k, a.top + m.pos_base_y * k,       // x0, y0
+                  a.left + (m.pos_base_x + m.size_base_x) * k,               // x1
+                  a.top + (m.pos_base_y + m.size_base_y) * k);               // y1
 }
-P1MapTransform LargeMapAt(const P1Snapshot& s, float clientH) {
-    return p1_radar_large_map(&s, clientH);   // .valid is 0 while the map is closed
+P1MapTransform LargeMapAt(const P1Snapshot& s, float clientW, float clientH) {
+    return p1_radar_large_map_in(&s, clientW, clientH);   // .valid is 0 while the map is closed
 })p1snip" },
 { "memory", "src/lessons/Memory.cpp", "CheckPeHeader()", 44,
 R"p1snip(// A read that survives every game patch: the PE headers at the module base.

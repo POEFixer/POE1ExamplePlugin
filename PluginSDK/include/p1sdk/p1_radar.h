@@ -114,7 +114,8 @@ enum {
 /* ---- per-entity radar data (parallel to the snapshot's entity array) ---------------- */
 enum {
     P1_ERAD_HIDDEN       = 1u << 0,  /* the app's default filters hide it right now: an opened
-                                        chest, a dead or untargetable monster                */
+                                        chest, a dead or untargetable monster, a Legion monster
+                                        the game keeps out of play (since 2026-11-17)       */
     P1_ERAD_GAME_ICON    = 1u << 1,  /* the app draws it with ITS OWN game icon (game_icon_cell) */
     P1_ERAD_HAS_POSITION = 1u << 2,  /* it has a position (server helpers have none)         */
     P1_ERAD_LOCAL_PLAYER = 1u << 3   /* it is the local player                                */
@@ -140,7 +141,8 @@ typedef struct P1QuestState {    /* the game's quest log, sorted by id */
 
 typedef struct P1QuestTrackerEntry {   /* the game's quest list, top to bottom */
     p1_str   id;                 /* Quest.dat Id of the entry                                 */
-    float    min_x, min_y, max_x, max_y;   /* the entry's box, UI base units (px = base*client_h/1600) */
+    float    min_x, min_y, max_x, max_y;   /* the entry's box, UI base units: px = (area.left + x*k,
+                                              area.top + y*k), k = UI area height / 1600 (p1_ui_area) */
 } P1QuestTrackerEntry;
 
 #define P1_ENTITY_RADAR_V1_BYTES 20u
@@ -324,10 +326,13 @@ static inline int p1_map_element_usable(const P1MapElement* m, float px_per_base
     return m->valid && m->visible && m->zoom > 0.0f && m->scale_rel > 0.0f && px_per_base > 0.0f;
 }
 
-/* The game's large map. px_per_base = client_h / ui_base_height. cal_* = the user's calibration
-   (1, 0, 0 = none). Invalid when the map is not open. */
-static inline P1MapTransform p1_large_map_transform(const P1MapElement* m, float px_per_base, float cal_scale,
-                                                    float cal_dx, float cal_dy, const P1RadarConsts* k) {
+/* The game's large map. px_per_base = the UI area's height / ui_base_height; origin_x/y = the UI
+   area's top-left in client px (POE1Fixer 50: p1_ui_area; 0, 0 and client_h when the game's UI
+   covers the whole client). cal_* = the user's calibration (1, 0, 0 = none). Invalid when the map
+   is not open. */
+static inline P1MapTransform p1_large_map_transform_at(const P1MapElement* m, float px_per_base, float origin_x,
+                                                       float origin_y, float cal_scale, float cal_dx, float cal_dy,
+                                                       const P1RadarConsts* k) {
     P1MapTransform t;
     memset(&t, 0, sizeof t);
     if (!p1_map_element_usable(m, px_per_base)) return t;
@@ -339,32 +344,50 @@ static inline P1MapTransform p1_large_map_transform(const P1MapElement* m, float
         cy += m->size_base_y * 0.5f * px_per_base;
     }
     cx *= k->large_center_mul_x;
+    cx += origin_x;
+    cy += origin_y;
     const float mul = k->shift_in_base_units ? px_per_base : 1.0f;
     cx += (m->shift_x + m->default_shift_x) * mul + cal_dx;
     cy += (m->shift_y + m->default_shift_y) * mul + cal_dy;
     return p1_make_transform(cx, cy, m->zoom * k->map_scale_factor * m->scale_rel * px_per_base * cal_scale, k);
 }
 
-/* The game's minimap (top-right). Clip your drawing to p1_mini_map_clip. */
-static inline P1MapTransform p1_mini_map_transform(const P1MapElement* m, float px_per_base, float cal_scale,
-                                                   float cal_dx, float cal_dy, const P1RadarConsts* k) {
+/* Before POE1Fixer 50 (the UI area at the client's top-left): origin 0, 0. Right for every window
+   whose aspect ratio is inside the game's limits; prefer the _at forms or p1_radar_*_in. */
+static inline P1MapTransform p1_large_map_transform(const P1MapElement* m, float px_per_base, float cal_scale,
+                                                    float cal_dx, float cal_dy, const P1RadarConsts* k) {
+    return p1_large_map_transform_at(m, px_per_base, 0.0f, 0.0f, cal_scale, cal_dx, cal_dy, k);
+}
+
+/* The game's minimap (top-right of the UI area). Clip your drawing to p1_mini_map_clip_at. */
+static inline P1MapTransform p1_mini_map_transform_at(const P1MapElement* m, float px_per_base, float origin_x,
+                                                      float origin_y, float cal_scale, float cal_dx, float cal_dy,
+                                                      const P1RadarConsts* k) {
     P1MapTransform t;
     memset(&t, 0, sizeof t);
     if (!p1_map_element_usable(m, px_per_base)) return t;
     const P1RadarConsts d = p1_radar_consts(NULL);
     if (!k) k = &d;
     const float mul = k->shift_in_base_units ? px_per_base : 1.0f;
-    const float cx = (m->pos_base_x + m->size_base_x * 0.5f) * px_per_base + (m->shift_x + m->default_shift_x) * mul + cal_dx;
-    const float cy = (m->pos_base_y + m->size_base_y * 0.5f) * px_per_base + (m->shift_y + m->default_shift_y) * mul + cal_dy;
+    const float cx = origin_x + (m->pos_base_x + m->size_base_x * 0.5f) * px_per_base + (m->shift_x + m->default_shift_x) * mul + cal_dx;
+    const float cy = origin_y + (m->pos_base_y + m->size_base_y * 0.5f) * px_per_base + (m->shift_y + m->default_shift_y) * mul + cal_dy;
     return p1_make_transform(cx, cy, m->zoom * k->map_scale_factor * m->scale_rel * px_per_base * cal_scale, k);
+}
+static inline P1MapTransform p1_mini_map_transform(const P1MapElement* m, float px_per_base, float cal_scale,
+                                                   float cal_dx, float cal_dy, const P1RadarConsts* k) {
+    return p1_mini_map_transform_at(m, px_per_base, 0.0f, 0.0f, cal_scale, cal_dx, cal_dy, k);
 }
 
 /* The minimap's client-px rectangle {min_x, min_y, max_x, max_y}. */
+static inline void p1_mini_map_clip_at(const P1MapElement* m, float px_per_base, float origin_x, float origin_y,
+                                       float out[4]) {
+    out[0] = origin_x + m->pos_base_x * px_per_base;
+    out[1] = origin_y + m->pos_base_y * px_per_base;
+    out[2] = origin_x + (m->pos_base_x + m->size_base_x) * px_per_base;
+    out[3] = origin_y + (m->pos_base_y + m->size_base_y) * px_per_base;
+}
 static inline void p1_mini_map_clip(const P1MapElement* m, float px_per_base, float out[4]) {
-    out[0] = m->pos_base_x * px_per_base;
-    out[1] = m->pos_base_y * px_per_base;
-    out[2] = (m->pos_base_x + m->size_base_x) * px_per_base;
-    out[3] = (m->pos_base_y + m->size_base_y) * px_per_base;
+    p1_mini_map_clip_at(m, px_per_base, 0.0f, 0.0f, out);
 }
 
 /* Snapshot conveniences: the transform the app's radar would use right now, with the user's
@@ -387,6 +410,43 @@ static inline P1MapTransform p1_radar_mini_map(const P1Snapshot* s, float client
     const P1RadarConsts k = p1_radar_consts(r);
     return p1_mini_map_transform(&s->mini_map, client_h / k.ui_base_height, r ? r->mini_cal_scale : 1.0f,
                                  r ? r->mini_cal_dx : 0.0f, r ? r->mini_cal_dy : 0.0f, &k);
+}
+
+/* POE1Fixer 50: the same, inside the game's UI area (p1_ui_area): right on a window wider than
+   the game's aspect limit too, where the game draws its UI between black bars. Prefer these:
+   with an older app (no ui_* fields) they equal the two above. P1Frame.viewport.client_w / _h. */
+static inline P1MapTransform p1_radar_large_map_in(const P1Snapshot* s, float client_w, float client_h) {
+    P1MapTransform t;
+    memset(&t, 0, sizeof t);
+    if (!s || !(s->flags & P1_SNAP_MAP_VALID) || !(client_w > 0.0f) || !(client_h > 0.0f)) return t;
+    const P1Radar* r = p1_radar_get(s);
+    const P1RadarConsts k = p1_radar_consts(r);
+    P1UiArea a;
+    p1_ui_area(s, client_w, client_h, &a);
+    return p1_large_map_transform_at(&s->large_map, (a.bottom - a.top) / k.ui_base_height, a.left, a.top,
+                                     r ? r->large_cal_scale : 1.0f, r ? r->large_cal_dx : 0.0f,
+                                     r ? r->large_cal_dy : 0.0f, &k);
+}
+static inline P1MapTransform p1_radar_mini_map_in(const P1Snapshot* s, float client_w, float client_h) {
+    P1MapTransform t;
+    memset(&t, 0, sizeof t);
+    if (!s || !(s->flags & P1_SNAP_MAP_VALID) || !(client_w > 0.0f) || !(client_h > 0.0f)) return t;
+    const P1Radar* r = p1_radar_get(s);
+    const P1RadarConsts k = p1_radar_consts(r);
+    P1UiArea a;
+    p1_ui_area(s, client_w, client_h, &a);
+    return p1_mini_map_transform_at(&s->mini_map, (a.bottom - a.top) / k.ui_base_height, a.left, a.top,
+                                    r ? r->mini_cal_scale : 1.0f, r ? r->mini_cal_dx : 0.0f,
+                                    r ? r->mini_cal_dy : 0.0f, &k);
+}
+/* The minimap's client-px rectangle inside the game's UI area; 0 when it cannot be computed. */
+static inline int p1_radar_mini_map_clip_in(const P1Snapshot* s, float client_w, float client_h, float out[4]) {
+    if (!s || !(s->flags & P1_SNAP_MAP_VALID) || !(client_w > 0.0f) || !(client_h > 0.0f)) return 0;
+    const P1RadarConsts k = p1_radar_consts(p1_radar_get(s));
+    P1UiArea a;
+    p1_ui_area(s, client_w, client_h, &a);
+    p1_mini_map_clip_at(&s->mini_map, (a.bottom - a.top) / k.ui_base_height, a.left, a.top, out);
+    return 1;
 }
 
 /* A standalone square panel of your own, the app radar's way: side = fsize * client_h (capped

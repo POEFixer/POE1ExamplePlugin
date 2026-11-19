@@ -548,6 +548,7 @@ The app samples the keys about 60 times a second, so a tap shorter than one samp
 | `buff_count/stride/offset`, `item_count/stride/offset` | the buff and inventory-item arrays |
 | `string_offset`, `string_bytes` | the string pool |
 | `radar_offset`, `radar_bytes` | appended fields: present only when `P1_SNAP_HAS(s, radar_bytes)`. Where the radar block (`P1Radar`) is; 0 = none. Written while a plugin with the `radar` permission runs. Read it with `p1_radar_get(&s)` or `p1::Radar::Get(s)`, which test all of this (section 11) |
+| `ui_left`, `ui_top`, `ui_right`, `ui_bottom` | appended (POE1Fixer 50): present only when `P1_SNAP_HAS(s, ui_bottom)`. The game's UI area in the game's own pixels (all 0 = not read). On a window wider than the game allows (2.4:1) or very tall, the game lays its UI out in this centred rectangle and draws black bars around it. Read it with `p1_ui_area(s, client_w, client_h, &area)` or `p1::Radar::UiArea(f)`, which scale it into client pixels (the game is DPI aware, the viewport is not) and fall back to the whole client |
 
 ### Flags
 
@@ -580,7 +581,7 @@ degrade gracefully:
 |---|---|
 | player buffs (`P1_SNAP_BUFFS_VALID`, `p1::PlayerBuffs`) | AutoPot reads them (it is enabled and running) |
 | `large_map`, `mini_map` (`P1_SNAP_MAP_VALID`) | the radar reads run: the user's radar is on, or a plugin with the `radar` permission runs |
-| `P1Entity::targetable` (monsters only, 0xFF otherwise) | the radar reads run. A value the radar already cached keeps being published |
+| `P1Entity::targetable` (monsters only, 0xFF otherwise) | the radar reads run, or AutoPot reads (its master switch or its open tab). A value already cached keeps being published |
 | `P1Entity::minimap_icon`, `transition_target`, `item_path` | the radar reads run; cached values keep being published |
 | the radar block (`p1_radar_get`) and its arrays | your plugin has the `radar` permission (the host removes the block for any other plugin); its data is fresh on ticks with `P1_SNAP_RADAR_VALID` |
 
@@ -600,19 +601,24 @@ array. Iterate the buffs with `p1::PlayerBuffs(s)`.
 `size_base_x/y`, `scale_rel`, `shift_x/y`, `default_shift_x/y`, `zoom`. The units are mixed, the
 way the game keeps them:
 
-- `pos_base` and `size_base` are in the game's UI base units (2560 x 1600, fitted to the height):
-  pixels = base x `client_h` / 1600.
+- `pos_base` and `size_base` are in the game's UI base units (2560 x 1600, fitted to the height),
+  placed inside the game's **UI area** (`p1::Radar::UiArea(f)`, C `p1_ui_area`): pixels =
+  (`area.left` + x x k, `area.top` + y x k) with k = (`area.bottom` - `area.top`) / 1600. The area is
+  the whole client unless the window is wider than the game allows (2.4:1 on the 2026-11-18 client)
+  or very tall: then the game draws its UI in a centred rectangle with black bars around it
+  (POE1Fixer 50; an older app reports no area, and `p1_ui_area` gives the whole client).
 - The **minimap** is a real rectangle: `pos_base` is its top-left corner, `size_base` its size.
 - The **large map** is not: its `pos_base` is the map's **centre**, and its `size_base` reads 0 x 0
   (the radar block says so with `P1_RADAR_LARGE_POS_IS_CENTRE`).
 - `shift_x/y` and `default_shift_x/y` are the game's own sub-map offsets in **client pixels**, not
   base units.
-- `scale_rel` is the element's scale relative to the UI root (multiply by `client_h` / 1600 for
-  pixels per base unit); `zoom` is the sub-map zoom, 0 = unusable.
+- `scale_rel` is the element's scale relative to the UI root (multiply by k above for pixels per
+  base unit); `zoom` is the sub-map zoom, 0 = unusable.
 
 Do not do this math by hand: `p1::Radar::LargeMap(f)` / `p1::Radar::MiniMap(f)` (C:
-`p1_radar_large_map`, `p1_radar_mini_map`) return the transform the app's own radar uses, with
-the user's calibration (section 11).
+`p1_radar_large_map_in(s, client_w, client_h)`, `p1_radar_mini_map_in`) return the transform the
+app's own radar uses, with the user's calibration and the UI area (section 11). The older C forms
+`p1_radar_large_map(s, client_h)` / `p1_radar_mini_map` assume the area is the whole client.
 
 ### Arrays: entities, buffs, inventory items
 
@@ -631,7 +637,7 @@ section 14.
 | `kind` | `P1_KIND_*` (player, monster, NPC, chest, world item, area transition, portal, waypoint, effect, misc object, unknown) |
 | `rarity` | 0 normal, 1 magic, 2 rare, 3 unique, 0xFF none |
 | `reaction` | 1 friendly (your minions too), anything else hostile or neutral, 0xFF none |
-| `targetable` | 0 / 1, 0xFF unknown (radar-gated, monsters only) |
+| `targetable` | 0 / 1, 0xFF unknown (radar- or AutoPot-gated, monsters only) |
 | `has_life`, `is_opened`, `is_strongbox` | 0 / 1 |
 | `grid_x`, `grid_y` | grid position |
 | `render_pos`, `render_bounds`, `rotation` | world position of the model's base, its bounds and its rotation. `render_pos` is what you project |
@@ -743,7 +749,8 @@ scales the result to the client size. The C form is
 - You are inside a full-panel window with no title bar, which scrolls inside itself. It gets
   **full mouse and keyboard input** while the user hovers or focuses it and the app's menu is
   shown: named keys, Ctrl/Shift/Alt, text characters, the mouse wheel, and Ctrl+V / Shift+Insert
-  pastes (the app sends its clipboard first). Your mouse cursor shape is applied.
+  pastes (the app sends its clipboard first, up to 256 KiB of text per paste; a longer clipboard is
+  cut at a character boundary). Your mouse cursor shape is applied.
 - The style is the app's current theme and UI scale. When the user changes the theme, the host
   replaces the whole style. For your own tweaks, use `PushStyleVar` / `PushStyleColor` around your
   widgets instead of editing `GetStyle()` once.
@@ -1172,17 +1179,20 @@ used. Get one from:
 
 | Where you draw | Transform | Notes |
 |---|---|---|
-| the game's large map (the full-screen map) | `p1::Radar::LargeMap(f)`, C `p1_radar_large_map(s, client_h)` | invalid while the map is closed |
-| the game's minimap (top right) | `p1::Radar::MiniMap(f)`, C `p1_radar_mini_map(s, client_h)` | clip to `p1::Radar::MiniMapClip(f, min, max)` (C `p1_mini_map_clip`) |
+| the game's large map (the full-screen map) | `p1::Radar::LargeMap(f)`, C `p1_radar_large_map_in(s, client_w, client_h)` | invalid while the map is closed |
+| the game's minimap (top right) | `p1::Radar::MiniMap(f)`, C `p1_radar_mini_map_in(s, client_w, client_h)` | clip to `p1::Radar::MiniMapClip(f, min, max)` (C `p1_radar_mini_map_clip_in`) |
 | a square panel of your own | `p1_panel_rect(client_w, client_h, fx, fy, fsize, rect)` + `p1_panel_transform(rect, zoom, px_per_base, &k)` | the app radar's panel: side = `fsize` x `client_h` (capped to the client), top-left (`fx` x `client_w`, `fy` x `client_h`) kept inside the client; `zoom` x `px_per_base` x 2 pixels per grid unit |
 | anything else | `p1_make_transform(cx, cy, scale, &k)` | |
 
 The two map transforms are invalid while `P1_SNAP_MAP_VALID` is not set. They apply the user's
 **calibration**: the corrections set in the app's Radar tab for each game map (`large_cal_scale`,
 `large_cal_dx`, `large_cal_dy`, `mini_cal_*` in the block; neutral = scale 1, offsets 0; offsets in
-client pixels). With your own map element math, pass them to `p1_large_map_transform(m,
-px_per_base, cal_scale, cal_dx, cal_dy, &k)` / `p1_mini_map_transform`. `px_per_base` is always
-`client_h / ui_base_height`.
+client pixels). With your own map element math, pass them to `p1_large_map_transform_at(m,
+px_per_base, origin_x, origin_y, cal_scale, cal_dx, cal_dy, &k)` / `p1_mini_map_transform_at` /
+`p1_mini_map_clip_at`, with `px_per_base` = (`area.bottom` - `area.top`) / `ui_base_height` and the
+origin at (`area.left`, `area.top`) of `p1_ui_area` (POE1Fixer 50). The forms without `_at` use
+origin 0 and are right only while the game's UI covers the whole client. A panel of your own is
+sized from the client (`client_h / ui_base_height`), not from the UI area.
 
 Apply a transform with `p1::Radar::ToMap(t, me, gx, gy, height)` (C:
 `p1_grid_to_map(&t, pgx, pgy, gx, gy, dz_world, &sx, &sy)`): pass the terrain height at the point,
@@ -1265,7 +1275,7 @@ empty when there is no block. Its fields:
 |---|---|
 | `category` | the app radar's classification, `P1_RCAT_*` (`SELF`, `PLAYER`, `MINION`, the four monster rarities, `ROGUE_EXILE`, `NPC`, the chests and `STRONGBOX`, `SHRINE`, `AREA_TRANSITION`, `WAYPOINT`, `CHECKPOINT`, `PORTAL`, the league mechanics, `QUEST_OBJECT`, `QUEST_ITEM`, `GAME_ICON`). `P1_RCAT_NONE` (0xFF) = the app's radar does not draw it. The list only grows: treat a value you do not know as unknown |
 | `group` | `P1_RGROUP_*` of the category: `PLAYERS`, `MONSTERS`, `NPCS`, `CHESTS`, `WORLD`, `LEAGUES`, `QUEST`, or `NONE` |
-| `flags` | `P1_ERAD_HIDDEN` (the app's default filters hide it right now: an opened chest, a dead or untargetable monster), `P1_ERAD_GAME_ICON` (the app draws it with its own game minimap icon, `game_icon_cell`), `P1_ERAD_HAS_POSITION`, `P1_ERAD_LOCAL_PLAYER` |
+| `flags` | `P1_ERAD_HIDDEN` (the app's default filters hide it right now: an opened chest, a dead or untargetable monster, a Legion monster the game keeps out of play: before the monolith is clicked, or broken out and waiting for time to resume), `P1_ERAD_GAME_ICON` (the app draws it with its own game minimap icon, `game_icon_cell`), `P1_ERAD_HAS_POSITION`, `P1_ERAD_LOCAL_PLAYER` |
 | `game_icon_cell` | the entity's game minimap icon in the atlas, `P1_ICON_CELL_NONE` (0xFFFF) = none |
 | `style_icon_cell` | the app's default icon for the category (not the user's own radar styles), or none |
 | `grid_x`, `grid_y`, `height` | float grid position and the terrain height under it |
@@ -1325,7 +1335,8 @@ if (const P1Radar* rb = p1::Radar::Get(s)) {
   a character switch the game can still hold the previous character's log.
 - **Quest list** (the game's list of tracked quests on the right of the screen):
   `P1QuestTrackerEntry` {`id`, `min_x`, `min_y`, `max_x`, `max_y`}, top to bottom. The box is in UI
-  base units: pixels = base x `client_h` / `ui_base_height`. An entry that an open game window
+  base units inside the UI area: pixels = (`area.left` + x x k, `area.top` + y x k), k = UI area
+  height / `ui_base_height` (`p1_ui_area`). An entry that an open game window
   covers is left out, and the list is not read in hideouts (the game shows none there).
   `tracker_serial` changes with the content.
 
@@ -1563,6 +1574,7 @@ Rules that keep a plugin working across app releases:
   | `P1Frame::terrain` (136 -> 144 bytes) | `P1_HAS_FIELD(&f, P1Frame, terrain)` | `p1_terrain_current` |
   | `P1HostApi::terrain_hold`, `terrain_release` (144 -> 160 bytes) | `P1SDK_HOST_HAS(&HostApi(), terrain_hold)` | `p1::TerrainRef` |
   | `P1_PERM_RADAR`, `P1_EV_TERRAIN_CHANGED`, `P1_SNAP_RADAR_VALID` | the app has radar data | |
+  | `P1Snapshot::ui_left`, `ui_top`, `ui_right`, `ui_bottom` (header 536 -> 552 bytes, POE1Fixer 50) | `P1_SNAP_HAS(s, ui_bottom)` | `p1_ui_area`, `p1::Radar::UiArea`, the `_in` transforms, `p1::Radar::LargeMap` / `MiniMap` / `MiniMapClip` |
 - **Index arrays by stride** (`p1::Entities`, `p1_entity_at`, ...), never as C arrays.
 - **Element sizes.** The arrays that came with the radar data are read through v1 element sizes,
   never `sizeof`: `P1_ENTITY_RADAR_V1_BYTES` (20), `P1_QUEST_STATE_V1_BYTES` (8),

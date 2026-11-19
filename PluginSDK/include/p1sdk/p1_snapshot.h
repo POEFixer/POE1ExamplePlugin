@@ -94,7 +94,7 @@ typedef struct P1Entity {
     uint8_t  kind;               /* P1_KIND_*                                              */
     uint8_t  rarity;             /* 0 normal, 1 magic, 2 rare, 3 unique, 0xFF none         */
     uint8_t  reaction;           /* 1 friendly, other = hostile/neutral, 0xFF none         */
-    uint8_t  targetable;         /* 0 / 1, 0xFF unknown (gate: radar)                      */
+    uint8_t  targetable;         /* 0 / 1, 0xFF unknown (gate: radar or AutoPot)          */
     uint8_t  has_life, is_opened, is_strongbox, _pad0;
     int32_t  grid_x, grid_y;     /* Positioned.GridPosition                                */
     P1Vec3   render_pos;         /* Render.Pos (model base, world units)                   */
@@ -151,14 +151,17 @@ typedef struct P1Camera {        /* sampled by the worker next to the entities  
 } P1Camera;
 
 /* One of the game's two map elements (gate: radar). Units are MIXED, as the game keeps them:
- *   pos_base / size_base: UI base units (2560x1600, height-fit); px = base * client_h/1600.
+ *   pos_base / size_base: UI base units (2560x1600, height-fit) inside the game's UI area
+ *     (p1_ui_area): px = (area.left + x*k, area.top + y*k), k = (area.bottom - area.top)/1600;
+ *     the area is the whole client unless the window is wider (or taller) than the game allows.
  *     The MINIMAP is a real rectangle: pos = its top-left, size = its size.
  *     The LARGE MAP is not: its pos is the map CENTRE and its size reads 0x0 (live 2026-11-02).
- *   scale_rel: element scale / root scale (multiply by client_h/1600 for px per base unit).
+ *   scale_rel: element scale / root scale (multiply by k above for px per base unit).
  *   shift / default_shift: the game's raw sub-map fields, in client PIXELS (not base units).
  *   zoom: the sub-map zoom (0 = unusable).
- * Do not do this math by hand: p1_radar.h has p1_large_map_transform / p1_mini_map_transform,
- * the projection the app's own radar uses (with the user's calibration). */
+ * Do not do this math by hand: p1_radar.h has p1_radar_large_map_in / p1_radar_mini_map_in
+ * (and the _at element forms), the projection the app's own radar uses (with the user's
+ * calibration). */
 typedef struct P1MapElement {
     uint8_t  valid, visible, _pad0[2];
     float    pos_base_x, pos_base_y, size_base_x, size_base_y;
@@ -224,6 +227,18 @@ typedef struct P1Snapshot {
     uint32_t radar_offset, radar_bytes;     /* the P1Radar struct itself (offset, its size);
                                                its arrays are placed by its own *_offset
                                                fields. 0 = no radar block                    */
+
+    /* ---- appended (POE1Fixer 50). Present only when P1_SNAP_HAS(s, ui_bottom): an older app
+       never wrote these bytes. The game's UI area, client pixels. When the game window's aspect
+       ratio is outside the game's limits (wider than 2.4:1 on the 2026-11-18 client, or very
+       tall) the game lays its whole UI out inside this centred rectangle and draws black bars
+       around it; every UI element (the large map, the minimap, panels, the passive tree) is
+       placed inside it. Read it with p1_ui_area(), which falls back to the whole client when the
+       rect is missing or belongs to another window size. A UI point in base units (the 2560x1600
+       space of P1MapElement and the radar block's ui_base_height) lands on client pixels
+       (area.left + x * k, area.top + y * k) with k = (area.bottom - area.top) / 1600.
+       The 3D world is not boxed: p1_world_to_screen() stays as it is.                         */
+    int32_t  ui_left, ui_top, ui_right, ui_bottom;   /* all 0 = not read                         */
 } P1Snapshot;
 
 /* ---- accessors ------------------------------------------------------------- */
@@ -248,6 +263,35 @@ static inline const P1InventoryItem* p1_item_at(const P1Snapshot* s, uint32_t i)
 }
 static inline int p1_key_down(const P1Viewport* v, int vk) {
     return (v && vk > 0 && vk < 256) ? ((v->keys_down[vk >> 3] >> (vk & 7)) & 1) : 0;
+}
+
+/* The game's UI area in client pixels for a client of client_w x client_h (P1Viewport). The ui_*
+   rect is in the GAME's pixels (the game is DPI aware, the viewport is not: they differ on a scaled
+   display). The game centres its area, so its own client is (left + right) x (top + bottom); the
+   rect is used when that client has this client's shape (about one game pixel of slack per axis)
+   and the area is at least a quarter of each side, scaled into client pixels. Otherwise, or with
+   an older app, the whole client. Same rule as the app's UiMath::UiAreaFor. Returns 1 when the
+   game's own rect was used, 0 for the whole client. */
+typedef struct P1UiArea { float left, top, right, bottom; } P1UiArea;
+static inline int p1_ui_area(const P1Snapshot* s, float client_w, float client_h, P1UiArea* out) {
+    P1UiArea a;
+    int used = 0;
+    a.left = 0.0f; a.top = 0.0f; a.right = client_w; a.bottom = client_h;
+    if (s && P1_SNAP_HAS(s, ui_bottom) && client_w > 0.0f && client_h > 0.0f) {
+        const float l = (float)s->ui_left, t = (float)s->ui_top, r = (float)s->ui_right, b = (float)s->ui_bottom;
+        const float w = r - l, h = b - t, gw = l + r, gh = t + b;
+        if (l >= 0.0f && t >= 0.0f && w > 0.0f && h > 0.0f && w * 4.0f >= gw && h * 4.0f >= gh) {
+            const float sx = client_w / gw, sy = client_h / gh;
+            const float d = sx > sy ? sx - sy : sy - sx;
+            const float slack = (sx > sy ? sx : sy) * (1.0f / gw + 1.0f / gh) * 1.5f;
+            if (sx >= 0.25f && sx <= 4.0f && sy >= 0.25f && sy <= 4.0f && !(d > slack)) {
+                a.left = l * sx; a.top = t * sy; a.right = r * sx; a.bottom = b * sy;
+                used = 1;
+            }
+        }
+    }
+    if (out) *out = a;
+    return used;
 }
 
 /* World -> game client pixels with the snapshot's camera (the same projection

@@ -452,22 +452,29 @@ inline TrackerRange Tracker(const P1Snapshot& s) noexcept {
     return TrackerRange(&s, 0, (r && r->tracker_stride >= P1_QUEST_TRACKER_V1_BYTES) ? r->tracker_count : 0u);
 }
 
-// The transforms the app's radar would use this frame (the user's calibration included).
+// The transforms the app's radar would use this frame (the user's calibration included), inside
+// the game's UI area (POE1Fixer 50: right on a window wider than the game's aspect limit too;
+// with an older app the same as before).
 inline P1MapTransform LargeMap(const P1Frame& f) noexcept {
-    return p1_radar_large_map(f.snapshot, float(f.viewport.client_h));
+    return p1_radar_large_map_in(f.snapshot, float(f.viewport.client_w), float(f.viewport.client_h));
 }
 inline P1MapTransform MiniMap(const P1Frame& f) noexcept {
-    return p1_radar_mini_map(f.snapshot, float(f.viewport.client_h));
+    return p1_radar_mini_map_in(f.snapshot, float(f.viewport.client_w), float(f.viewport.client_h));
 }
 // The minimap's rectangle in client px (push it as a clip rect: ImDrawList::PushClipRect).
 inline bool MiniMapClip(const P1Frame& f, ImVec2& mn, ImVec2& mx) noexcept {
-    if (!f.snapshot || !(f.snapshot->flags & P1_SNAP_MAP_VALID) || f.viewport.client_h <= 0) return false;
-    const P1RadarConsts k = p1_radar_consts(p1_radar_get(f.snapshot));
     float r[4];
-    p1_mini_map_clip(&f.snapshot->mini_map, float(f.viewport.client_h) / k.ui_base_height, r);
+    if (!p1_radar_mini_map_clip_in(f.snapshot, float(f.viewport.client_w), float(f.viewport.client_h), r))
+        return false;
     mn = ImVec2(r[0], r[1]);
     mx = ImVec2(r[2], r[3]);
     return true;
+}
+// The game's UI area in client px (p1_ui_area): place anything you draw over game UI inside it.
+inline P1UiArea UiArea(const P1Frame& f) noexcept {
+    P1UiArea a;
+    p1_ui_area(f.snapshot, float(f.viewport.client_w), float(f.viewport.client_h), &a);
+    return a;
 }
 
 // Player motion: the worker samples the player 30-60 times a second, the game scrolls its map

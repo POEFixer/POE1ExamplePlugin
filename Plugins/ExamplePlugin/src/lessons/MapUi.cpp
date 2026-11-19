@@ -18,27 +18,37 @@ constexpr LessonInfo kInfo{
             "size, in the game's UI base units. The large map is not: its pos is the map's CENTRE and its size "
             "reads 0 x 0. shift and default_shift are client pixels; zoom is the sub-map zoom (both maps share it).",
     .when = "Drawing on or next to the game's maps: the minimap's rectangle to clip to, the large map's centre and "
-            "scale to place things. For a radar use p1_radar_large_map / p1_radar_mini_map (the Build a radar lesson).",
+            "scale to place things. For a radar use p1::Radar::LargeMap / MiniMap (C: p1_radar_large_map_in / "
+            "p1_radar_mini_map_in; the Build a radar lesson).",
     .limits = "Gated: read while the app's radar, or a plugin with the \"radar\" permission (this one), runs "
-              "(P1_SNAP_MAP_VALID). UI base units are 2560 x 1600 fitted to the height: client pixels = base x "
-              "client_h / 1600. The game hides the minimap while the large map is open.",
+              "(P1_SNAP_MAP_VALID). UI base units are 2560 x 1600 fitted to the height of the game's UI area: "
+              "client pixels = (area.left + base x k, area.top + base x k), k = area height / 1600 (p1_ui_area). "
+              "The area is the whole client unless the window is wider than 2.4:1 or very tall: then the game "
+              "draws black bars around a centred area (POE1Fixer 50). The game hides the minimap while the large "
+              "map is open.",
     .snippet = "mapui",
 };
 
 // [snippet:mapui]
-// The minimap is a real rectangle: pos is its top-left and size its size, in
-// UI base units (2560 x 1600 fitted to the window height: both axes scale by
-// client_h / 1600). The large map is NOT: its pos is the map's CENTRE and its
-// size reads 0 x 0. Its transform (p1_radar.h) adds the shift, the zoom and the
-// user's calibration: the player is drawn at (t.cx, t.cy), and t.scale is the
-// pixels per grid cell before the camera's cos / sin.
-ImVec4 MiniMapClientRect(const P1MapElement& m, float clientH) {
-    const float k = clientH / 1600.0f;
-    return ImVec4(m.pos_base_x * k, m.pos_base_y * k, (m.pos_base_x + m.size_base_x) * k,
-                  (m.pos_base_y + m.size_base_y) * k);   // x0, y0, x1, y1
+// UI base units (2560 x 1600) are fitted to the height of the game's UI area:
+// the whole client, unless the window is wider (or taller) than the game allows
+// and it draws black bars around a centred area (p1_ui_area, POE1Fixer 50).
+// The minimap is a real rectangle: pos is its top-left and size its size. The
+// large map is NOT: its pos is the map's CENTRE and its size reads 0 x 0. Its
+// transform (p1_radar.h) adds the area, the shift, the zoom and the user's
+// calibration: the player is drawn at (t.cx, t.cy), and t.scale is the pixels
+// per grid cell before the camera's cos / sin.
+ImVec4 MiniMapClientRect(const P1Snapshot& s, float clientW, float clientH) {
+    P1UiArea a;
+    p1_ui_area(&s, clientW, clientH, &a);   // the whole client with an older app
+    const float k = (a.bottom - a.top) / 1600.0f;
+    const P1MapElement& m = s.mini_map;
+    return ImVec4(a.left + m.pos_base_x * k, a.top + m.pos_base_y * k,       // x0, y0
+                  a.left + (m.pos_base_x + m.size_base_x) * k,               // x1
+                  a.top + (m.pos_base_y + m.size_base_y) * k);               // y1
 }
-P1MapTransform LargeMapAt(const P1Snapshot& s, float clientH) {
-    return p1_radar_large_map(&s, clientH);   // .valid is 0 while the map is closed
+P1MapTransform LargeMapAt(const P1Snapshot& s, float clientW, float clientH) {
+    return p1_radar_large_map_in(&s, clientW, clientH);   // .valid is 0 while the map is closed
 }
 // [/snippet]
 
@@ -118,18 +128,30 @@ private:
         if (w - cw * k >= ui::Em(15.0f)) {
             ImGui::SameLine(0.0f, ui::Em(1.0f));
             ImGui::BeginGroup();
-            DrawClientValues(s, ch);
+            DrawClientValues(s, cw, ch);
             ImGui::EndGroup();
         } else {
-            DrawClientValues(s, ch);
+            DrawClientValues(s, cw, ch);
         }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(o, ImVec2(o.x + cw * k, o.y + ch * k), ImGui::GetColorU32(ImGuiCol_FrameBg), 3.0f);
         dl->AddRect(o, ImVec2(o.x + cw * k, o.y + ch * k), ImGui::GetColorU32(ImGuiCol_Border), 3.0f);
         auto at = [&](float x, float y) { return ImVec2(o.x + x * k, o.y + y * k); };
+        // The game's UI area, when it is not the whole client: the black bars around it.
+        P1UiArea area;
+        const bool boxed = p1_ui_area(&s, cw, ch, &area) &&
+                           (area.left > 0.5f || area.top > 0.5f || area.right < cw - 0.5f || area.bottom < ch - 0.5f);
+        if (boxed) {
+            const ImU32 bar = IM_COL32(0, 0, 0, 160);
+            dl->AddRectFilled(at(0, 0), at(area.left, ch), bar);
+            dl->AddRectFilled(at(area.right, 0), at(cw, ch), bar);
+            dl->AddRectFilled(at(area.left, 0), at(area.right, area.top), bar);
+            dl->AddRectFilled(at(area.left, area.bottom), at(area.right, ch), bar);
+            dl->AddRect(at(area.left, area.top), at(area.right, area.bottom), ui::ToneU32(ui::Tone::Warn, 0.8f), 0.0f, 0, 1.0f);
+        }
         // The minimap: a rectangle.
         if (s.mini_map.valid) {
-            const ImVec4 r = MiniMapClientRect(s.mini_map, ch);
+            const ImVec4 r = MiniMapClientRect(s, cw, ch);
             const bool on = s.mini_map.visible != 0;
             dl->AddRectFilled(at(r.x, r.y), at(r.z, r.w), ui::ToneU32(ui::Tone::Ok, on ? 0.30f : 0.10f));
             dl->AddRect(at(r.x, r.y), at(r.z, r.w), ui::ToneU32(ui::Tone::Ok, on ? 1.0f : 0.4f), 0.0f, 0, 1.5f);
@@ -138,10 +160,13 @@ private:
         }
         // The large map: a centre, and how big 50 cells around the player are on it.
         if (s.large_map.valid) {
-            const P1MapTransform t = LargeMapAt(s, ch);
+            const P1MapTransform t = LargeMapAt(s, cw, ch);
             const bool on = t.valid != 0;
-            const float pxPerBase = ch / 1600.0f;
-            const ImVec2 c = on ? at(t.cx, t.cy) : at(s.large_map.pos_base_x * pxPerBase, s.large_map.pos_base_y * pxPerBase);
+            P1UiArea a;
+            p1_ui_area(&s, cw, ch, &a);
+            const float pxPerBase = (a.bottom - a.top) / 1600.0f;
+            const ImVec2 c = on ? at(t.cx, t.cy)
+                                : at(a.left + s.large_map.pos_base_x * pxPerBase, a.top + s.large_map.pos_base_y * pxPerBase);
             const ImU32 col = ui::ToneU32(ui::Tone::Info, on ? 1.0f : 0.4f);
             if (on) {
                 ImVec2 q[4];
@@ -160,22 +185,27 @@ private:
             dl->AddText(ImVec2(std::floor(c.x + arm + ui::Em(0.2f)), std::floor(c.y - ui::Em(1.2f))), col,
                         on ? "large map: the centre" : "large map (closed)");
         }
-        ui::TextDim("The frame is the game's client area (%.0f x %.0f). The cross is where the large map draws the "
+        ui::TextDim("The frame is the game's client area (%.0f x %.0f)%s. The cross is where the large map draws the "
                     "player; the diamond is 150 x 150 grid cells around it. A dim shape: valid, but hidden.",
-                    double(cw), double(ch));
+                    double(cw), double(ch),
+                    boxed ? "; the game draws its UI only inside the inner frame, black bars around it" : "");
     }
 
-    static void DrawClientValues(const P1Snapshot& s, float clientH) {
+    static void DrawClientValues(const P1Snapshot& s, float clientW, float clientH) {
         ui::TextDim("The snippet's values, in client pixels:");
-        if (!ui::BeginKv("client", { "minimap", "large map centre", "large map scale" })) return;
+        if (!ui::BeginKv("client", { "UI area", "minimap", "large map centre", "large map scale" })) return;
+        P1UiArea a;
+        const int used = p1_ui_area(&s, clientW, clientH, &a);
+        ui::KvText("UI area", "%.0f, %.0f to %.0f, %.0f\n%s", double(a.left), double(a.top), double(a.right),
+                   double(a.bottom), used ? "the game's (p1_ui_area)" : "the whole client");
         if (s.mini_map.valid) {
-            const ImVec4 r = MiniMapClientRect(s.mini_map, clientH);
+            const ImVec4 r = MiniMapClientRect(s, clientW, clientH);
             ui::KvTone("minimap", ui::Tone::Ok, "%.0f, %.0f to %.0f, %.0f\n%.0f x %.0f px", double(r.x), double(r.y),
                        double(r.z), double(r.w), double(r.z - r.x), double(r.w - r.y));
         } else {
             ui::KvText("minimap", "not valid");
         }
-        const P1MapTransform t = LargeMapAt(s, clientH);
+        const P1MapTransform t = LargeMapAt(s, clientW, clientH);
         if (t.valid) {
             ui::KvTone("large map centre", ui::Tone::Info, "%.0f, %.0f", double(t.cx), double(t.cy));
             ui::KvTone("large map scale", ui::Tone::Info, "%.2f px per grid cell", double(t.scale));

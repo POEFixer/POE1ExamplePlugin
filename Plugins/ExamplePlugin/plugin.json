@@ -1,7 +1,7 @@
 {
   "id": "example",
   "name": "SDK Example",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "author": "POE1Fixer",
   "description": "A guided tour of the plugin SDK: 24 lessons, each with live data, the limits the app enforces and a code snippet to copy, the last one a radar of its own on the game's maps. Reads game memory only on its Memory page; sends input only when you arm its safe demo (one mouse move, no click, no key). Uses no network.",
   "dll": "ExamplePlugin.dll",
